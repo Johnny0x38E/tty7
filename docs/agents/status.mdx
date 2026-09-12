@@ -14,13 +14,19 @@ the agent say which one it is.
 
 | Agent | |
 |---|---|
-| Claude Code · Codex · TraeCode · Copilot CLI · OpenCode · Pi · Grok Build · Oh My Pi · Gemini · Droid · Qwen Code · Goose · Kimi Code | Hooks available |
+| Claude Code · Codex · TraeCode · Copilot CLI · OpenCode · Pi · Grok Build · Oh My Pi · Gemini · Droid · Qwen Code · Goose · Kimi Code · Qoder CLI · Crush | Hooks available |
 | Aider · Amp · Cursor · Auggie · Hermes · Vibe · Antigravity | Detected and labelled, but no status channel yet |
 
 Installing writes into that agent's own configuration directory. Once installed
 the row grows a second **Uninstall** button beside the first, which itself
 becomes **Reinstall** — or **Update**, against an **Outdated** state, when tty7
 ships a newer hook.
+
+<Note>
+  Crush ships only a `PreToolUse` hook today, so it reports **working** — a
+  tool call is the only turn signal there is — but never **done**. On a Crush
+  pane, `tty7 wait` times out rather than returning.
+</Note>
 
 <Note>
   The hooks only do anything inside tty7. Running the same agent in another
