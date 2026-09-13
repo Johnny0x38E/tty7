@@ -1449,6 +1449,21 @@ export default function (pi: ExtensionAPI) {{
   try {{
     pi.on("session_start", (_event, ctx) => emit("session-start", ctx));
   }} catch {{}}
+  // Pi-only: Oh My Pi may not expose the UI-prompt hooks, so each one is
+  // guarded on its own — a fork that rejects the event name must not take the
+  // rest of the bridge down with it. Without these the pane never reports
+  // "waiting for you" while a dialog is open, and the event vocabulary already
+  // carries question-asked / permission-request for exactly that.
+  try {{
+    pi.on("ui_prompt_start", (event, ctx) => {{
+      emit(event.kind === "confirm" ? "permission-request" : "question-asked", ctx);
+    }});
+  }} catch {{}}
+  // The dialog closed, so the agent is working again. Without this the pane
+  // would stay on "waiting" until the next stop.
+  try {{
+    pi.on("ui_prompt_end", (_event, ctx) => emit("prompt-submit", ctx));
+  }} catch {{}}
 }}
 "#
     ))
@@ -2205,6 +2220,8 @@ mod tests {
                 "agent_start",
                 "agent_end",
                 "session_shutdown",
+                "ui_prompt_start",
+                "ui_prompt_end",
             ] {
                 assert!(
                     bridge.contains(&format!(r#"pi.on("{event}""#)),
