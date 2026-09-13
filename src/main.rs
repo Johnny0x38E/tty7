@@ -638,6 +638,24 @@ fn main() {
     application.on_open_urls(move |urls| {
         let _ = external_open_tx.try_send(urls);
     });
+    // macOS relaunching an app that is already running — the Dock icon, a
+    // double-click on the bundle, `open -a tty7` — only reaches this process
+    // as `applicationShouldHandleReopen:`, and gpui's delegate does nothing
+    // with it unless a handler is registered. That is the one entrance a
+    // tray-resident tty7 has: with `show_tray_icon` on, closing the last
+    // window keeps the process and its Dock icon alive with nothing on
+    // screen, and without this the icon's click was a no-op (the only ways
+    // back in were ⌘N, the tray's "Show tty7", or quitting and relaunching).
+    // Like `on_open_urls`, the hook lives on `Application`, so it cannot go
+    // beside the other app-level handlers in `keymap::init`; and like that
+    // path it defers to the loop rather than opening windows on AppKit's
+    // delegate stack, which is also how Zed's own reopen handler runs.
+    application.on_reopen(|cx| {
+        cx.spawn(async move |cx| {
+            let _ = cx.update(crate::ui::windows::reopen);
+        })
+        .detach();
+    });
     application.run(move |cx| {
         // gpui invokes this callback without an `App` context. Bridge it
         // back onto the application loop instead of touching UI state on
