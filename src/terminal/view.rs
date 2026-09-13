@@ -1208,6 +1208,27 @@ fn fallback_chain(family: &str, configured: &[String]) -> Vec<String> {
     chain
 }
 
+/// Put `chain` on the regular face and on the bold and italic ones.
+///
+/// Bold and italic never carry a chain of their own — `alt_font` copies theirs
+/// off the regular face when they are built — so a rebuild that skipped them
+/// would leave two of the three faces resolving against the old chain.
+fn apply_fallback_chain(
+    chain: Vec<String>,
+    font: &mut Font,
+    bold: &mut Option<Font>,
+    italic: &mut Option<Font>,
+) {
+    let fallbacks = Some(gpui::FontFallbacks::from_fonts(chain));
+    font.fallbacks = fallbacks.clone();
+    if let Some(font) = bold {
+        font.fallbacks = fallbacks.clone();
+    }
+    if let Some(font) = italic {
+        font.fallbacks = fallbacks;
+    }
+}
+
 impl TerminalView {
     pub fn spawn_shell_terminal_in(
         workspace: Option<crate::terminal::PaneWorkspace>,
@@ -3460,14 +3481,30 @@ impl TerminalView {
     }
 
     pub fn set_font_family(&mut self, family: String, cx: &mut Context<Self>) {
-        let fallbacks = self.font.fallbacks.clone();
         let mut font = gpui::font(family);
-        font.fallbacks = fallbacks;
         if let Some(features) = &self.font_features {
             font.features = features.clone();
         }
         self.font = font;
+        // Rebuild rather than carry the chain over: `fallback_chain` skips
+        // pinning a last-resort face that the family already is, so the chain
+        // that went with the old family can be missing a pin the new one needs.
+        self.reread_fallback_chain(cx);
         cx.notify();
+    }
+
+    /// Rebuild the fallback chain from the config and put it on all three faces.
+    ///
+    /// The chain is built once in `with_terminal` and then only ever cloned
+    /// around, so a `font_fallbacks` edit reaches new panes and no one else.
+    pub fn reread_fallback_chain(&mut self, cx: &mut Context<Self>) {
+        let chain = fallback_chain(&self.font.family, &cx.global::<Config>().font_fallbacks);
+        apply_fallback_chain(
+            chain,
+            &mut self.font,
+            &mut self.font_bold,
+            &mut self.font_italic,
+        );
     }
 
     pub fn set_font_family_bold(&mut self, family: Option<String>, cx: &mut Context<Self>) {
@@ -8577,6 +8614,33 @@ mod tests {
             "Hack",
             "a Hack-prefixed family name must not suppress the bundled anchor"
         );
+    }
+
+    #[test]
+    fn apply_fallback_chain_reaches_every_face_a_view_has() {
+        // Bold and italic are the ones at risk: they hold a copy taken off the
+        // regular face when `alt_font` built them, so a rebuild that wrote only
+        // the regular face would strand them on the chain it replaced.
+        let mut font = gpui::font("Hack");
+        let mut bold = Some(gpui::font("Hack Bold"));
+        let mut italic = Some(gpui::font("Hack Italic"));
+
+        super::apply_fallback_chain(vec!["Menlo".to_string()], &mut font, &mut bold, &mut italic);
+
+        for face in [&font, bold.as_ref().unwrap(), italic.as_ref().unwrap()] {
+            assert_eq!(face.fallbacks.as_ref().unwrap().fallback_list(), ["Menlo"]);
+        }
+
+        // Neither is configured by default, and a view carries `None` for one
+        // it was never given.
+        let (mut none_bold, mut none_italic) = (None, None);
+        super::apply_fallback_chain(
+            vec!["Menlo".to_string()],
+            &mut font,
+            &mut none_bold,
+            &mut none_italic,
+        );
+        assert_eq!(font.fallbacks.unwrap().fallback_list(), ["Menlo"]);
     }
 
     #[test]
