@@ -1690,25 +1690,47 @@ fn stored_password(profile: &SshProfile) -> String {
         .unwrap_or_default()
 }
 
-/// The first key file a profile names that is actually there.
+/// The first key file a profile would offer that is actually there.
 ///
 /// A passphrase is accounted by the key's *contents*, not by its path, so a
 /// file that cannot be read is a key nothing can be stored against.
 fn first_readable_key(profile: &SshProfile) -> Option<String> {
-    profile
-        .expanded_identity_files()
-        .into_iter()
-        .find(|p| std::fs::metadata(crate::core::ssh_profile::expand_tilde(p)).is_ok())
+    first_readable_key_in(&profile.identity_files, &profile.host, &profile.user)
 }
 
 /// The same answer for a form that has not been collected into a profile yet:
 /// the key field as typed, with the host and user beside it filling in `%h`
 /// and `%r`.
 fn first_readable_key_in(files: &[String], host: &str, user: &str) -> Option<String> {
-    files
-        .iter()
-        .map(|f| crate::core::ssh_profile::expand_identity_placeholders(f, host, user))
-        .find(|p| std::fs::metadata(crate::core::ssh_profile::expand_tilde(p)).is_ok())
+    first_readable_key_or(
+        files,
+        host,
+        user,
+        crate::core::ssh_profile::default_identity_candidates,
+    )
+}
+
+/// An empty key field is not "no key": `build_spec_inner` offers the `~/.ssh`
+/// defaults then, and looks their passphrases up by those exact strings. The
+/// box has to follow the same list, or the most common setup — no key named,
+/// an encrypted `id_ed25519` — could never be given a passphrase here.
+fn first_readable_key_or(
+    files: &[String],
+    host: &str,
+    user: &str,
+    defaults: impl FnOnce() -> Vec<String>,
+) -> Option<String> {
+    let candidates = if files.is_empty() {
+        defaults()
+    } else {
+        files
+            .iter()
+            .map(|f| crate::core::ssh_profile::expand_identity_placeholders(f, host, user))
+            .collect()
+    };
+    candidates
+        .into_iter()
+        .find(|p| std::fs::metadata(p).is_ok())
 }
 
 fn stored_passphrase(key_path: &str) -> String {
@@ -3857,16 +3879,17 @@ impl Tty7App {
         // The passphrase belongs to whichever key the field above names, so
         // when that answer changes the box has to change with it. Without this
         // a form opened on one key and pointed at another would carry the
-        // first key's passphrase across and save it over the second's.
-        subs.push(cx.subscribe_in(
-            &identity_files,
-            window,
-            |this, _i, ev: &InputEvent, window, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    this.resync_key_passphrase(window, cx);
-                }
-            },
-        ));
+        // first key's passphrase across and save it over the second's. Host and
+        // user count too: they fill in a `%h` / `%r` in the key's path.
+        for input in [&identity_files, &host, &user] {
+            subs.push(
+                cx.subscribe_in(input, window, |this, _i, ev: &InputEvent, window, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        this.resync_key_passphrase(window, cx);
+                    }
+                }),
+            );
+        }
         let mut watch = vec![
             &name,
             &host,
@@ -8129,10 +8152,24 @@ mod tests {
             Some(real.to_string_lossy().to_string())
         );
         assert_eq!(
-            first_readable_key_in(&[missing], "example.com", "ada"),
+            first_readable_key_in(&[missing.clone()], "example.com", "ada"),
             None
         );
-        assert_eq!(first_readable_key_in(&[], "example.com", "ada"), None);
+        // An empty field falls back to the defaults the handshake offers —
+        // and a named key, even a missing one, replaces them entirely.
+        let defaults = || vec![missing.clone(), real.to_string_lossy().to_string()];
+        assert_eq!(
+            first_readable_key_or(&[], "example.com", "ada", defaults),
+            Some(real.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            first_readable_key_or(&[missing.clone()], "example.com", "ada", defaults),
+            None
+        );
+        assert_eq!(
+            first_readable_key_or(&[], "example.com", "ada", Vec::new),
+            None
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -251,7 +251,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUserHint => "连接时再定",
         L10nKey::SettingsPasswordDesc => "存在系统钥匙串里，不会写进配置文件。",
         L10nKey::SettingsPasswordHint => "连接时再问",
-        L10nKey::SettingsForget => "清除",
         L10nKey::SettingsKeyPassphrase => "密钥口令",
         L10nKey::SettingsKeyPassphraseDesc => "用来解锁上面那个密钥，存在系统钥匙串里。",
         L10nKey::SettingsPassphraseNeedsKey => "先填一个密钥文件——口令是跟着它解锁的那个密钥存的。",

@@ -281,7 +281,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "システムのキーチェーンに保存され、設定ファイルには書き込まれません。"
         }
         L10nKey::SettingsPasswordHint => "接続時に入力する",
-        L10nKey::SettingsForget => "削除",
         L10nKey::SettingsKeyPassphrase => "鍵のパスフレーズ",
         L10nKey::SettingsKeyPassphraseDesc => {
             "上の鍵を解錠します。システムのキーチェーンに保存されます。"

@@ -273,7 +273,6 @@ l10n_keys! {
     SettingsPassword,
     SettingsPasswordDesc,
     SettingsPasswordHint,
-    SettingsForget,
     SettingsKeyPassphrase,
     SettingsKeyPassphraseDesc,
     SettingsPassphraseNeedsKey,

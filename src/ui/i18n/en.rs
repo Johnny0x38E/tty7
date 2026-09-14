@@ -278,7 +278,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsUserHint => "resolved at connect",
         L10nKey::SettingsPasswordDesc => "Kept in the system keychain, never in the config file.",
         L10nKey::SettingsPasswordHint => "Ask when connecting",
-        L10nKey::SettingsForget => "Forget",
         L10nKey::SettingsKeyPassphrase => "Key passphrase",
         L10nKey::SettingsKeyPassphraseDesc => "Unlocks the key above. Kept in the system keychain.",
         L10nKey::SettingsPassphraseNeedsKey => {
