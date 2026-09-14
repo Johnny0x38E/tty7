@@ -1644,7 +1644,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppOpenTerminalFailed => "ターミナルを開けませんでした: {error}",
         L10nKey::AppTabsNotRestored => "前回のタブ {count} 個を開き直せませんでした",
         L10nKey::AppFullscreenEntered => "全画面表示 — 解除するには {key}",
-        L10nKey::AppFullscreenEnteredNoKey => "全画面表示 — 解除するまでタイトルバーは非表示です",
+        L10nKey::AppFullscreenEnteredNoKey => {
+            "全画面表示 — 解除するまでウィンドウボタンは非表示です"
+        }
         L10nKey::LaunchWorkspacesLeftRunning => {
             "このウィンドウだけを復元しました — あと {count} 個のワークスペースがバックグラウンドで実行中です。サイドバーから開き直せます。"
         }

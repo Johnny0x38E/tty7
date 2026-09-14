@@ -1170,17 +1170,26 @@ fn clear_window_override_values(config: &mut Config, backdrop_is_local: bool) {
 /// it and leaving takes it away.
 struct FullscreenHint;
 
-/// Whether fullscreen takes the title bar away on this platform.
+/// Whether the title bar carries minimize, maximize and close right now.
 ///
-/// Not on macOS, where fullscreen belongs to the system rather than to the app.
-/// The traffic lights live on that bar, and revealing the menu bar draws a
-/// translucent strip over the same band, which the bar absorbs; without it the
-/// strip lands on the terminal instead and covers its first row. There is also
-/// nothing there to fix: `WindowControls` draws no minimize, maximize or close
-/// on macOS — the three that are dead in fullscreen elsewhere are the system's
-/// there, and it hides them itself. So the bar is not broken chrome on macOS,
-/// it is part of how the system dresses a fullscreen window.
-const FULLSCREEN_TAKES_THE_TITLE_BAR: bool = !cfg!(target_os = "macos");
+/// Not in fullscreen. A fullscreen window has no caption: Windows clears
+/// `WS_CAPTION` and answers `HTCLIENT` along the whole top edge, so the three
+/// buttons would draw, light up under the pointer and do nothing when clicked.
+/// The row they sit at the end of stays, because it is also the tab strip.
+///
+/// Never on macOS, which draws no buttons of its own: those are the system's
+/// traffic lights, and the system hides them itself.
+pub(crate) fn window_controls_drawn(fullscreen: bool) -> bool {
+    !cfg!(target_os = "macos") && !fullscreen
+}
+
+/// How much of the title bar's trailing end the window buttons take.
+pub(crate) fn window_controls_w(fullscreen: bool) -> f32 {
+    match window_controls_drawn(fullscreen) {
+        true => WINDOW_CONTROLS_W,
+        false => 0.,
+    }
+}
 
 impl Tty7App {
     pub fn for_workspace(
@@ -3545,7 +3554,7 @@ impl Tty7App {
     /// Toggle fullscreen, and say how to leave it on the way in.
     ///
     /// Only on the way in, and only from the action: entering is an instant in
-    /// which the title bar disappears, and a window that starts fullscreen
+    /// which the window buttons disappear, and a window that starts fullscreen
     /// because the setting says so is not a surprise anybody needs explaining.
     /// The chord comes from the keymap rather than from a string, because it is
     /// `F11` on Windows and Linux, `Cmd+Enter` on macOS, and either of them may
@@ -3563,14 +3572,14 @@ impl Tty7App {
         let entering = !window.is_fullscreen();
         window.toggle_fullscreen();
         window.remove_notification::<FullscreenHint>(cx);
-        // Nothing disappeared where the bar stays, so there is nothing to
-        // explain.
-        if !entering || !FULLSCREEN_TAKES_THE_TITLE_BAR {
+        // Nothing disappeared where there were no buttons to begin with, so
+        // there is nothing to explain.
+        if !entering || !window_controls_drawn(false) {
             return;
         }
         let hint = match crate::ui::home::key_hint("ToggleFullscreen", cx) {
             Some(chord) => t_fmt(L10nKey::AppFullscreenEntered, &[("key", &chord)]),
-            // Rebound to nothing at all: still worth saying the bar is gone,
+            // Rebound to nothing at all: still worth saying the buttons are gone,
             // just without naming a key that would not work.
             None => t(L10nKey::AppFullscreenEnteredNoKey).to_string(),
         };
@@ -7665,22 +7674,41 @@ impl Render for Tty7App {
             }
         };
 
-        // No title bar in fullscreen. The bar is window chrome — a caption to
-        // drag the window by and the three controls at its end — and a
-        // fullscreen window has none of that to offer: it has no caption for
-        // the platform to hit-test, so the buttons draw, light up under the
-        // pointer and do nothing at all when clicked. Drawing chrome that
-        // cannot work is worse than drawing none, and taking it away is also
-        // what the mode is for.
-        let fullscreen = window.is_fullscreen();
-        let bar_is_gone = fullscreen && FULLSCREEN_TAKES_THE_TITLE_BAR;
-        let title_bar = (!bar_is_gone).then(|| {
-            TitleBar::new()
-                .h(px(TITLE_BAR_HEIGHT))
-                .bg(cx.theme().transparent)
-                .border_color(cx.theme().transparent)
-                .child(strip)
-        });
+        // No window buttons in fullscreen, where they cannot work: the window
+        // has no caption for the platform to hit-test, so they would draw,
+        // light up under the pointer and do nothing when clicked. `TitleBar`
+        // always draws them, so the strip goes into a plain row of the same
+        // geometry instead — the row itself stays, since it holds the tabs,
+        // the chrome tiles and the docked document's header.
+        let title_bar =
+            if window_controls_drawn(window.is_fullscreen()) || cfg!(target_os = "macos") {
+                TitleBar::new()
+                    .h(px(TITLE_BAR_HEIGHT))
+                    .bg(cx.theme().transparent)
+                    .border_color(cx.theme().transparent)
+                    .child(strip)
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(TITLE_BAR_HEIGHT))
+                    .pl(px(TITLE_BAR_LEAD))
+                    .border_b_1()
+                    .border_color(cx.theme().transparent)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .h_full()
+                            .flex_1()
+                            .child(strip),
+                    )
+                    .into_any_element()
+            };
         let body_area = div()
             .flex_1()
             .relative()
@@ -7784,9 +7812,9 @@ impl Render for Tty7App {
         let panel_below_title_bar =
             (right_panel.is_some() || document_column.is_some()) && !cfg!(target_os = "macos");
         let (column_title_bar, spanning_title_bar) = if panel_below_title_bar {
-            (None, title_bar)
+            (None, Some(title_bar))
         } else {
-            (title_bar, None)
+            (Some(title_bar), None)
         };
         let (column_overlays, hoisted_overlays) = if panel_below_title_bar {
             (Vec::new(), overlays)
@@ -7882,7 +7910,9 @@ impl Render for Tty7App {
                                         .right(px(panel_px))
                                         .w(px(document_px))
                                         .when(panel_px <= 0., |d| {
-                                            d.pr(px(crate::ui::tab_strip::trailing_chrome_w()))
+                                            d.pr(px(crate::ui::tab_strip::trailing_chrome_w(
+                                                window.is_fullscreen(),
+                                            )))
                                         })
                                         .child(header),
                                 )
@@ -9466,6 +9496,24 @@ mod tests {
             "the band must reach the far edge of the frame, not of the surface"
         );
         assert_eq!(band.size.height, px(TITLE_BAR_HEIGHT));
+    }
+
+    /// Fullscreen takes the window buttons and nothing else: the strip keeps
+    /// its row, and the room reserved for the buttons at its end comes back.
+    /// macOS never had any to take.
+    #[test]
+    fn fullscreen_drops_the_window_buttons_but_not_their_row() {
+        assert!(!super::window_controls_drawn(true));
+        assert_eq!(super::window_controls_w(true), 0.);
+        assert_eq!(
+            super::window_controls_drawn(false),
+            !cfg!(target_os = "macos")
+        );
+        assert_eq!(super::window_controls_w(false), super::WINDOW_CONTROLS_W);
+        assert_eq!(
+            crate::ui::tab_strip::trailing_chrome_w(true),
+            crate::ui::tab_strip::trailing_chrome_tiles_w()
+        );
     }
 
     /// A surface narrower than its own shadow is only reachable mid-resize, but

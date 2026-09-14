@@ -1582,7 +1582,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppTabsNotRestored => "{count} tabs from last time could not be reopened",
         L10nKey::AppFullscreenEntered => "Fullscreen — press {key} to leave",
         L10nKey::AppFullscreenEnteredNoKey => {
-            "Fullscreen — the title bar is hidden until you leave"
+            "Fullscreen — the window buttons are hidden until you leave"
         }
         L10nKey::LaunchWorkspacesLeftRunning => {
             "Only this window was restored — {count} workspaces are still running in the background. Reopen them from the sidebar."
