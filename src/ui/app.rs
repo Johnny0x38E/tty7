@@ -10411,12 +10411,17 @@ mod keybinding_gpui_tests {
         });
     }
 
-    fn wait_for_binding(vcx: &mut VisualTestContext, action: &str, expected: &str) {
+    /// Waits for `action`'s entry in config to read `expected` — compared as the
+    /// JSON the file gets, since that is what the reader of `config.json` sees.
+    fn wait_for_binding(vcx: &mut VisualTestContext, action: &str, expected: serde_json::Value) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             vcx.background_executor.run_until_parked();
-            let got = vcx.update(|_, cx| cx.global::<Config>().keybindings.get(action).cloned());
-            if got.as_deref() == Some(expected) {
+            let got = vcx.update(|_, cx| {
+                serde_json::to_value(cx.global::<Config>().keybindings.get(action))
+                    .expect("a binding serializes")
+            });
+            if got == expected {
                 return;
             }
             assert!(
@@ -10432,7 +10437,15 @@ mod keybinding_gpui_tests {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "NewTab");
         vcx.simulate_keystrokes("secondary-shift-n");
-        wait_for_binding(&mut vcx, "NewTab", "secondary-shift-n");
+        // A list, because recording a shortcut on the Settings page *sets* it:
+        // the row showed one chord and now shows another. A bare string in
+        // config adds a chord beside the default (#868), which is not what
+        // the person at the row just did.
+        wait_for_binding(
+            &mut vcx,
+            "NewTab",
+            serde_json::json!(["secondary-shift-n"]),
+        );
 
         let recording = app.update_in(&mut vcx, |app, _, _| {
             app.active_settings().map(|s| s.recording.is_some())
@@ -10450,7 +10463,33 @@ mod keybinding_gpui_tests {
         begin_capture(&app, &mut vcx, "CloseActiveTab");
         vcx.simulate_keystrokes("secondary-b");
         vcx.simulate_keystrokes("x");
-        wait_for_binding(&mut vcx, "CloseActiveTab", "secondary-b x");
+        wait_for_binding(
+            &mut vcx,
+            "CloseActiveTab",
+            serde_json::json!(["secondary-b x"]),
+        );
+    }
+
+    #[gpui::test]
+    fn recording_a_chord_another_action_also_has_takes_only_that_chord(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            cx.global_mut::<Config>().keybindings =
+                serde_json::from_value(serde_json::json!({
+                    "NextTab": ["ctrl-tab", "secondary-alt-n"],
+                }))
+                .expect("the binding loads");
+            crate::ui::keymap::rebind(cx);
+        });
+        begin_capture(&app, &mut vcx, "NewTab");
+        vcx.simulate_keystrokes("secondary-alt-n");
+        wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["secondary-alt-n"]));
+        // Emptying the other action was right when an action had one chord.
+        // With two, it would take Ctrl+Tab away as well, for a keystroke that
+        // was never on it.
+        wait_for_binding(&mut vcx, "NextTab", serde_json::json!(["ctrl-tab"]));
     }
 
     #[gpui::test]
@@ -10458,8 +10497,8 @@ mod keybinding_gpui_tests {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "NewTab");
         vcx.simulate_keystrokes("alt-enter");
-        wait_for_binding(&mut vcx, "NewTab", "alt-enter");
-        wait_for_binding(&mut vcx, "InsertNewline", "");
+        wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["alt-enter"]));
+        wait_for_binding(&mut vcx, "InsertNewline", serde_json::json!([]));
 
         let note = app.update_in(&mut vcx, |app, _, _| {
             app.active_settings().and_then(|s| s.rebinding_note.clone())

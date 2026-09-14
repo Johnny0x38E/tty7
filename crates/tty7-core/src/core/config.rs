@@ -1932,6 +1932,25 @@ mod tests {
         assert!(cfg.keybindings.is_empty());
     }
 
+    #[test]
+    fn keybindings_take_a_chord_or_a_list_and_write_back_what_they_read() {
+        // A string is the shape every config written before #868 has, from the
+        // Settings page and by hand; a list is the one that replaces an
+        // action's chords outright. Both have to load, and a save must not turn
+        // one into the other — the two mean different things.
+        let written = serde_json::json!({
+            "NextTab": "cmd-shift-]",
+            "AlternatePaste": "",
+            "PrevTab": ["cmd-shift-[", "ctrl-shift-tab"],
+            "SplitRight": [],
+        });
+        let cfg: Config =
+            serde_json::from_value(serde_json::json!({ "keybindings": written.clone() }))
+                .expect("both shapes load");
+        assert_eq!(cfg.keybindings.len(), 4);
+        assert_eq!(serde_json::to_value(&cfg.keybindings).unwrap(), written);
+    }
+
     fn pin_config_dir() {
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();

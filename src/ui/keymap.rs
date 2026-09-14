@@ -2266,6 +2266,164 @@ mod gpui_tests {
         });
     }
 
+    /// An app whose `config.json` reads `json`, keymap and all. Parsed from
+    /// text rather than built in Rust, because the file is the surface #868 is
+    /// about: what a hand-written line means is the thing under test.
+    fn running_on_json(cx: &mut gpui::App, json: &str) {
+        gpui_component::init(cx);
+        cx.set_global(Config(
+            serde_json::from_str(json).expect("the config parses"),
+        ));
+        init(cx);
+    }
+
+    /// What the live keymap dispatches for `keys` typed in a terminal, best
+    /// match first — the first entry is the action a real keypress runs.
+    fn fired(cx: &gpui::App, keys: &str) -> Vec<&'static str> {
+        use gpui::Action as _;
+        let input: Vec<Keystroke> = keys
+            .split(' ')
+            .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
+            .collect();
+        let context = [gpui::KeyContext::parse("Terminal").expect("the context parses")];
+        cx.key_bindings()
+            .borrow()
+            .bindings_for_input(&input, &context)
+            .0
+            .iter()
+            .map(|b| b.action().name())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_chord_added_in_config_keeps_the_default_one(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            // The report, word for word: a second way to reach the tab switcher
+            // took the first one away (#868).
+            running_on_json(
+                cx,
+                r#"{"keybindings": {"NextTab": "ctrl-alt-]", "PrevTab": "ctrl-alt-["}}"#,
+            );
+            assert_eq!(
+                fired(cx, "ctrl-tab").first(),
+                Some(&NextTab::name_for_type()),
+                "the default chord survives a chord added beside it"
+            );
+            assert_eq!(
+                fired(cx, "ctrl-shift-tab").first(),
+                Some(&PrevTab::name_for_type())
+            );
+            assert_eq!(
+                fired(cx, "ctrl-alt-]").first(),
+                Some(&NextTab::name_for_type()),
+                "and the added chord works too"
+            );
+            assert_eq!(
+                fired(cx, "ctrl-alt-[").first(),
+                Some(&PrevTab::name_for_type())
+            );
+            // The palette hint and the menus still name the chord the app
+            // ships with.
+            assert_eq!(effective_key("NextTab", cx).as_deref(), Some("ctrl-tab"));
+        });
+    }
+
+    #[gpui::test]
+    fn an_empty_chord_still_unbinds_the_action(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // What config files already say to retire a default — the docs spell
+            // `"AlternatePaste": ""` — and what Settings used to write for an
+            // action that lost its chord. It has to keep meaning "no key".
+            running_on_json(cx, r#"{"keybindings": {"NextTab": ""}}"#);
+            assert!(fired(cx, "ctrl-tab").is_empty());
+            assert_eq!(effective_key("NextTab", cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn a_list_is_the_whole_set_of_chords_for_an_action(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            running_on_json(
+                cx,
+                r#"{"keybindings": {"NextTab": ["ctrl-alt-]", "ctrl-alt-n"]}}"#,
+            );
+            assert!(
+                fired(cx, "ctrl-tab").is_empty(),
+                "a list replaces the default rather than joining it"
+            );
+            for chord in ["ctrl-alt-]", "ctrl-alt-n"] {
+                assert_eq!(
+                    fired(cx, chord).first(),
+                    Some(&NextTab::name_for_type()),
+                    "{chord} is in the list"
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn an_empty_list_unbinds_the_action(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            running_on_json(cx, r#"{"keybindings": {"NextTab": []}}"#);
+            assert!(fired(cx, "ctrl-tab").is_empty());
+            assert_eq!(effective_key("NextTab", cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn a_chord_added_under_the_tmux_preset_joins_the_preset_chord(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            running_on_json(
+                cx,
+                r#"{"keybinding_preset": "tmux",
+                    "keybindings": {"NextTab": "ctrl-alt-]", "SplitRight": ["ctrl-alt-d"]}}"#,
+            );
+            // The preset is a scheme, and it still replaces the default chord.
+            assert!(fired(cx, "ctrl-tab").is_empty());
+            // A chord added on top of it is added to the preset's chord.
+            assert_eq!(
+                fired(cx, "ctrl-b n").first(),
+                Some(&NextTab::name_for_type())
+            );
+            assert_eq!(
+                fired(cx, "ctrl-alt-]").first(),
+                Some(&NextTab::name_for_type())
+            );
+            // A list replaces the preset's chord the way it replaces a default.
+            assert!(fired(cx, "ctrl-b %").is_empty());
+            assert_eq!(
+                fired(cx, "ctrl-alt-d").first(),
+                Some(&SplitRight::name_for_type())
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_chord_the_user_adds_wins_over_a_default_already_on_it(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            // `ctrl-tab` is `NextTab`'s default, and `NewTab` sits above it in the
+            // table. The keymap resolves a tie to the binding added last, so a
+            // user chord laid down in table order lost to the default whenever
+            // its action happened to come first — the line in config.json was
+            // read and did nothing.
+            running_on_json(cx, r#"{"keybindings": {"NewTab": "ctrl-tab"}}"#);
+            assert_eq!(
+                fired(cx, "ctrl-tab").first(),
+                Some(&NewTab::name_for_type()),
+                "the chord the user asked for is the one that runs"
+            );
+            assert_eq!(
+                fired(cx, per_platform("secondary-t", "secondary-shift-t")).first(),
+                Some(&NewTab::name_for_type()),
+                "and NewTab keeps its own default"
+            );
+        });
+    }
+
     #[gpui::test]
     fn repeated_rebinds_do_not_grow_the_keymap(cx: &mut TestAppContext) {
         cx.update(|cx| {
