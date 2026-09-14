@@ -27,10 +27,11 @@ pub enum CLIAgent {
     // moving an existing discriminant would break mixed-version clients.
     TraeCode,
     QoderCLI,
+    Crush,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 21] = [
+    pub const ALL: [CLIAgent; 22] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -52,6 +53,7 @@ impl CLIAgent {
         CLIAgent::OhMyPi,
         CLIAgent::Kimi,
         CLIAgent::QoderCLI,
+        CLIAgent::Crush,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -94,6 +96,9 @@ impl CLIAgent {
             // launch is the cost: it wears the CLI's avatar for as long as the
             // launcher takes to exit.
             CLIAgent::QoderCLI => &["qoder", "qodercli"],
+            // Charm's terminal agent. One binary, and the name on `PATH` is
+            // the one it starts as.
+            CLIAgent::Crush => &["crush"],
         }
     }
 
@@ -120,6 +125,7 @@ impl CLIAgent {
             CLIAgent::OhMyPi => "omp",
             CLIAgent::Kimi => "kimi",
             CLIAgent::QoderCLI => "qodercli",
+            CLIAgent::Crush => "crush",
         }
     }
 
@@ -151,6 +157,7 @@ impl CLIAgent {
             CLIAgent::OhMyPi => "Oh My Pi",
             CLIAgent::Kimi => "Kimi Code",
             CLIAgent::QoderCLI => "Qoder CLI",
+            CLIAgent::Crush => "Crush",
         }
     }
 
@@ -186,6 +193,7 @@ impl CLIAgent {
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --resume {session_id}")),
             CLIAgent::Kimi => Some(format!("kimi{flags} --session {session_id}")),
+            CLIAgent::Crush => Some(format!("crush{flags} --session {session_id}")),
             _ => None,
         }
     }
@@ -429,6 +437,11 @@ impl CLIAgent {
                 "--fork-session",
                 "--worktree",
             ],
+            // `--session`/`-s` names the conversation to restore and
+            // `--continue`/`-C` the most recent one; both clash with the
+            // `--session {id}` this command appends. `-c` is *not* in that
+            // group here — Crush spells `--cwd` with it, and it must survive.
+            CLIAgent::Crush => &["--session", "-s", "--continue", "-C"],
             _ => &[],
         };
         let mut i = 0;
@@ -494,6 +507,8 @@ impl CLIAgent {
             // black, which Codex and Grok already have covered.
             CLIAgent::Kimi => 0x027AFF,
             CLIAgent::QoderCLI => 0xFFFFFF,
+            // The blue-violet field Charm ships the Crush heart on.
+            CLIAgent::Crush => 0x6B50FF,
         }
     }
 
@@ -535,6 +550,7 @@ impl CLIAgent {
             CLIAgent::Qwen => "icons/agents/qwen.svg",
             CLIAgent::Kimi => "icons/agents/kimi.svg",
             CLIAgent::QoderCLI => "icons/agents/qodercli.svg",
+            CLIAgent::Crush => "icons/agents/crush.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
@@ -1014,6 +1030,8 @@ mod tests {
             ("/opt/homebrew/bin/omp", CLIAgent::OhMyPi),
             ("kimi", CLIAgent::Kimi),
             ("/usr/local/bin/kimi", CLIAgent::Kimi),
+            ("crush", CLIAgent::Crush),
+            ("/opt/homebrew/bin/crush", CLIAgent::Crush),
         ] {
             assert_eq!(CLIAgent::detect_from_argv(&argv(&[cmd])), Some(agent));
         }
@@ -1654,6 +1672,42 @@ mod tests {
                 .fork_command("q-1", Some(&persistent))
                 .as_deref(),
             Some("qodercli --model qoder-1 --resume q-1 --fork-session")
+        );
+    }
+
+    #[test]
+    fn crush_resumes_by_session_and_keeps_its_cwd_flag() {
+        let argv = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            CLIAgent::Crush.resume_command("c-1", None).as_deref(),
+            Some("crush --session c-1")
+        );
+        assert_eq!(
+            CLIAgent::Crush
+                .resume_command("c-2", Some(&argv(&["crush", "--session", "c-1", "--yolo"])))
+                .as_deref(),
+            Some("crush --yolo --session c-2"),
+            "a stale --session and its id come off before the new one goes on"
+        );
+        assert_eq!(
+            CLIAgent::Crush
+                .resume_command("c-3", Some(&argv(&["crush", "--continue", "-C", "--yolo"])))
+                .as_deref(),
+            Some("crush --yolo --session c-3"),
+            "both spellings of continue are stale with it"
+        );
+        // `-c` is `--cwd` in Crush, not `--continue`, and must survive.
+        assert_eq!(
+            CLIAgent::Crush
+                .resume_command("c-4", Some(&argv(&["crush", "-c", "/repo/tree", "--yolo"])))
+                .as_deref(),
+            Some("crush -c /repo/tree --yolo --session c-4")
+        );
+        assert_eq!(
+            CLIAgent::Crush.fork_command("c-1", None),
+            None,
+            "Crush has no fork command"
         );
     }
 

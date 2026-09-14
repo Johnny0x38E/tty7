@@ -267,10 +267,11 @@ pub enum HookAgent {
     Goose,
     Kimi,
     QoderCLI,
+    Crush,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 14] = [
+    pub const ALL: [HookAgent; 15] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -285,6 +286,7 @@ impl HookAgent {
         HookAgent::Goose,
         HookAgent::Kimi,
         HookAgent::QoderCLI,
+        HookAgent::Crush,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -308,6 +310,7 @@ impl HookAgent {
             CLIAgent::Goose => Some(HookAgent::Goose),
             CLIAgent::Kimi => Some(HookAgent::Kimi),
             CLIAgent::QoderCLI => Some(HookAgent::QoderCLI),
+            CLIAgent::Crush => Some(HookAgent::Crush),
             CLIAgent::Aider
             | CLIAgent::Amp
             | CLIAgent::Cursor
@@ -330,6 +333,7 @@ impl HookAgent {
             HookAgent::Droid => Some(DROID_HOOK_EVENTS),
             HookAgent::Qwen => Some(QWEN_HOOK_EVENTS),
             HookAgent::QoderCLI => Some(QODER_HOOK_EVENTS),
+            HookAgent::Crush => Some(CRUSH_HOOK_EVENTS),
             HookAgent::Copilot
             | HookAgent::OpenCode
             | HookAgent::Pi
@@ -350,6 +354,14 @@ impl HookAgent {
         }
     }
 
+    /// Whether this agent's hook-map entries carry `command` and `matcher` at
+    /// the top level rather than nesting a `hooks` array of `{type, command}`
+    /// objects inside the matcher. Claude's shape is the latter; Crush flattened
+    /// it, and still calls itself Claude-Code-compatible on the wire.
+    fn flat_hook_map(self) -> bool {
+        matches!(self, HookAgent::Crush)
+    }
+
     pub fn slug(self) -> &'static str {
         match self {
             HookAgent::Claude => "claude",
@@ -366,6 +378,7 @@ impl HookAgent {
             HookAgent::Goose => "goose",
             HookAgent::Kimi => "kimi",
             HookAgent::QoderCLI => "qodercli",
+            HookAgent::Crush => "crush",
         }
     }
 
@@ -385,6 +398,7 @@ impl HookAgent {
             HookAgent::Goose => "Goose",
             HookAgent::Kimi => "Kimi Code",
             HookAgent::QoderCLI => "Qoder CLI",
+            HookAgent::Crush => "Crush",
         }
     }
 
@@ -418,6 +432,7 @@ impl HookAgent {
             }
             HookAgent::Kimi => target.kimi_config_path(),
             HookAgent::QoderCLI => target.qoder_settings_path(),
+            HookAgent::Crush => target.crush_settings_path(),
         }
     }
 
@@ -517,6 +532,20 @@ impl<'a> HookTarget<'a> {
             return PathBuf::from(dir).join("settings.json");
         }
         self.under_home(&[".qoder", "settings.json"])
+    }
+
+    /// The global `crush.json`. Crush resolves it through `CRUSH_GLOBAL_CONFIG`
+    /// when set, otherwise `$XDG_CONFIG_HOME/crush/crush.json` (and `~/.config`
+    /// when that is unset) — which is exactly what [`Self::xdg_config_dir`]
+    /// answers. The override is local-only: a local env var must not redirect a
+    /// remote machine's hooks.
+    fn crush_settings_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("CRUSH_GLOBAL_CONFIG").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("crush.json");
+        }
+        self.under(&self.xdg_config_dir(), &["crush", "crush.json"])
     }
 
     fn traecli_hooks_path(&self) -> PathBuf {
@@ -831,6 +860,18 @@ const QODER_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionEnd", "session-end"),
 ];
 
+/// Crush currently fires exactly one hook, `PreToolUse`, before every
+/// top-level tool call and before its permission check. Its payload still
+/// carries `session_id` and `cwd`, which is what resume needs.
+///
+/// It maps to `tool-complete`, not `prompt-submit`: with no `Stop` to follow,
+/// a turn started here would never end, and a pane stuck on working asks
+/// before every close and holds the tray and `tty7 wait` on a turn long over.
+/// `tool-complete` records the session and bumps the activity counter while
+/// leaving the status alone. When Crush ships `UserPromptSubmit`/`Stop` and
+/// friends, they slot in here.
+const CRUSH_HOOK_EVENTS: &[(&str, &str)] = &[("PreToolUse", "tool-complete")];
+
 fn hook_map_state(
     target: &HookTarget,
     path: &Path,
@@ -915,9 +956,13 @@ fn hook_map_install(
             continue;
         };
         list.retain(|matcher| marker_command(matcher, &marker).is_none());
-        list.push(serde_json::json!({
-            "hooks": [{ "type": "command", "command": command }]
-        }));
+        if agent.flat_hook_map() {
+            list.push(serde_json::json!({ "command": command }));
+        } else {
+            list.push(serde_json::json!({
+                "hooks": [{ "type": "command", "command": command }]
+            }));
+        }
     }
 
     target.write(path, serde_json::to_string_pretty(&root)?.as_bytes())
@@ -961,8 +1006,21 @@ fn hook_map_uninstall(
     Ok(HookOutcome::Removed)
 }
 
-fn marker_command<'a>(matcher: &'a serde_json::Value, marker: &str) -> Option<&'a str> {
-    matcher
+/// The tty7 command an entry in a hook map carries, if it is one of ours.
+///
+/// Two shapes reach here. Claude and its imitators nest it at
+/// `entry.hooks[].command`; Crush lifts `command` to the entry itself, the
+/// same level as its `matcher`. Both are one list under `hooks.<Event>`, so
+/// the state reader, the installer and the uninstaller all stay shared.
+fn marker_command<'a>(entry: &'a serde_json::Value, marker: &str) -> Option<&'a str> {
+    if let Some(command) = entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .filter(|c| c.contains(marker))
+    {
+        return Some(command);
+    }
+    entry
         .get("hooks")
         .and_then(|h| h.as_array())?
         .iter()
@@ -1176,6 +1234,7 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::Droid
         | HookAgent::Qwen
         | HookAgent::QoderCLI
+        | HookAgent::Crush
         | HookAgent::Kimi => None,
     }
 }
@@ -1632,6 +1691,7 @@ mod tests {
             .chain(QWEN_HOOK_EVENTS)
             .chain(GOOSE_HOOK_EVENTS)
             .chain(KIMI_HOOK_EVENTS)
+            .chain(CRUSH_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
             .collect();
@@ -1667,6 +1727,7 @@ mod tests {
             ),
             (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
             (HookAgent::QoderCLI, "/home/me/.qoder/settings.json"),
+            (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
         ] {
             assert_eq!(
                 agent.target_path(&t),
@@ -1688,6 +1749,7 @@ mod tests {
             HookAgent::Goose,
             HookAgent::Kimi,
             HookAgent::QoderCLI,
+            HookAgent::Crush,
         ] {
             assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
             install_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
@@ -1815,6 +1877,26 @@ mod tests {
         assert_eq!(state.message, None);
         apply_hook(&mut state, "Stop", r#"{"session_id":"q-1"}"#);
         assert_eq!(state.status, AgentStatus::Done);
+    }
+
+    /// Crush's lone `PreToolUse` has no `Stop` to close a turn behind it, so it
+    /// must not open one: the pane would read as busy until Crush exits.
+    #[test]
+    fn crush_tool_calls_record_the_session_without_starting_a_turn() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        let mut state = AgentSessionState::default();
+        for (hook, event) in HookAgent::Crush.hook_map_events().unwrap() {
+            assert_eq!(*hook, "PreToolUse");
+            let input =
+                r#"{"event":"PreToolUse","session_id":"c-1","cwd":"/repo","tool_name":"bash"}"#;
+            let event = effective_event("crush", event, input).unwrap();
+            state.apply_event(&round_trip("crush", event, input));
+        }
+        assert_eq!(state.status, AgentStatus::Idle);
+        assert_eq!(state.session_id.as_deref(), Some("c-1"));
+        assert_eq!(state.cwd.as_deref(), Some(Path::new("/repo")));
+        assert_eq!(state.activity, 1);
     }
 
     /// Qwen is the one agent that reports a blocked turn outright, so it must
@@ -1965,6 +2047,18 @@ mod tests {
         });
         assert!(marker_command(&theirs, "agent-hook claude").is_none());
         assert!(marker_command(&serde_json::json!({}), "agent-hook claude").is_none());
+
+        // Crush flattens the same entry: `command` sits beside `matcher` rather
+        // than inside a nested `hooks` array, and the reader has to see it.
+        let flat = serde_json::json!({
+            "matcher": "^bash$",
+            "command": "\"/x/tty7\" agent-hook crush prompt-submit"
+        });
+        assert_eq!(
+            marker_command(&flat, "agent-hook crush"),
+            Some("\"/x/tty7\" agent-hook crush prompt-submit")
+        );
+        assert!(marker_command(&flat, "agent-hook claude").is_none());
     }
 
     fn local_host() -> crate::host::SharedHost {
@@ -2075,6 +2169,7 @@ mod tests {
             ),
             (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
             (HookAgent::QoderCLI, "/home/me/.qoder/settings.json"),
+            (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
         ] {
             assert_eq!(
                 agent.target_path(&target),
@@ -2398,6 +2493,195 @@ mod tests {
         );
         assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
         for path in [settings, untouched] {
+            let actual: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(actual, user_config, "{}", path.display());
+        }
+    }
+
+    /// Crush's hook map is one list under `hooks.PreToolUse` like Claude's, but
+    /// each entry carries `command` and `matcher` directly instead of wrapping
+    /// them in a nested `hooks` array. The merge has to write the flat shape and
+    /// still leave a user's own hooks and the rest of `crush.json` alone.
+    #[test]
+    fn crush_installs_a_flat_hook_and_preserves_user_entries() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-crush-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = HookTarget::remote(&*host, base.clone());
+        let config = HookAgent::Crush.target_path(&target);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let user_config = serde_json::json!({
+            "model": "crush-test",
+            "hooks": {
+                "PreToolUse": [
+                    { "matcher": "^bash$", "command": "echo user-hook", "timeout": 5 }
+                ]
+            }
+        });
+        std::fs::write(&config, serde_json::to_string_pretty(&user_config).unwrap()).unwrap();
+
+        assert_eq!(
+            hooks_state(&target, HookAgent::Crush),
+            HooksState::NotInstalled
+        );
+        install_hooks(&target, HookAgent::Crush).expect("install succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::Crush),
+            HooksState::Installed
+        );
+        install_hooks(&target, HookAgent::Crush).expect("re-install succeeds");
+
+        let merged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(merged["model"], "crush-test");
+        let entries = merged["hooks"]["PreToolUse"].as_array().unwrap();
+        let ours: Vec<&serde_json::Value> = entries
+            .iter()
+            .filter(|e| {
+                e.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains("agent-hook crush"))
+            })
+            .collect();
+        assert_eq!(ours.len(), 1, "exactly one tty7 entry after two installs");
+        assert_eq!(
+            ours[0]["command"].as_str(),
+            Some(
+                target
+                    .hook_command(HookAgent::Crush, "tool-complete")
+                    .as_str()
+            ),
+            "the entry is flat and names the tool-complete emitter"
+        );
+        assert!(
+            ours[0].get("hooks").is_none(),
+            "Crush does not nest a hooks array inside the entry"
+        );
+        assert!(
+            entries.iter().any(|e| e
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.contains("user-hook"))),
+            "the user's own PreToolUse hook survives"
+        );
+
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::Crush).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(
+            hooks_state(&target, HookAgent::Crush),
+            HooksState::NotInstalled
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            after, user_config,
+            "uninstall restores the user's file exactly"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn crush_global_config_controls_local_hook_lifecycle() {
+        const CASE_ENV: &str = "TTY7_TEST_CRUSH_CONFIG_CASE";
+        const ROOT_ENV: &str = "TTY7_TEST_CRUSH_CONFIG_ROOT";
+        let Ok(case) = std::env::var(CASE_ENV) else {
+            // Each case gets its own environment, without changing the one
+            // shared by the other tests or touching the user's settings.
+            for case in ["override", "empty", "unset"] {
+                let sandbox = tempfile::tempdir().unwrap();
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        "core::agent_hooks::tests::crush_global_config_controls_local_hook_lifecycle",
+                        "--nocapture",
+                    ])
+                    .env(CASE_ENV, case)
+                    .env(ROOT_ENV, sandbox.path())
+                    // `crush_settings_path` falls back to `$XDG_CONFIG_HOME`
+                    // before the sandbox home, and CI exports it. Neutralise it
+                    // so the default lands under the home this test owns.
+                    .env_remove("XDG_CONFIG_HOME");
+                match case {
+                    "override" => {
+                        child.env("CRUSH_GLOBAL_CONFIG", sandbox.path().join("custom config"))
+                    }
+                    "empty" => child.env("CRUSH_GLOBAL_CONFIG", ""),
+                    _ => child.env_remove("CRUSH_GLOBAL_CONFIG"),
+                };
+                let output = crate::core::proc::output_within(
+                    crate::core::proc::hide_console(&mut child),
+                    std::time::Duration::from_secs(30),
+                )
+                .expect("run the isolated Crush hook test");
+                assert!(
+                    output.status.success(),
+                    "{case}:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            return;
+        };
+
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
+        let host = local_host();
+        let target = HookTarget {
+            host: &*host,
+            home: root.join("home"),
+            exe: std::env::current_exe().unwrap(),
+        };
+        let default_config = target.home.join(".config").join("crush").join("crush.json");
+        let custom_config = root.join("custom config").join("crush.json");
+        let (config, untouched) = if case == "override" {
+            (&custom_config, &default_config)
+        } else {
+            (&default_config, &custom_config)
+        };
+        let user_config = serde_json::json!({
+            "model": "crush-test",
+            "hooks": {
+                "PreToolUse": [
+                    { "command": "echo user-hook" }
+                ]
+            }
+        });
+        for path in [config, untouched] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_string(&user_config).unwrap()).unwrap();
+        }
+
+        let agent = HookAgent::Crush;
+        assert_eq!(agent.target_path(&target), *config);
+        let remote_host = FakeRemote::shared();
+        let remote = HookTarget::remote(&*remote_host, PathBuf::from("/home/me"));
+        assert_eq!(
+            agent.target_path(&remote),
+            PathBuf::from("/home/me/.config/crush/crush.json"),
+            "a local override must not redirect remote hooks"
+        );
+
+        assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
+        assert_eq!(
+            install_hooks(&target, agent).unwrap(),
+            HookOutcome::Installed
+        );
+        assert_eq!(hooks_state(&target, agent), HooksState::Installed);
+        assert!(
+            std::fs::read_to_string(config)
+                .unwrap()
+                .contains("agent-hook crush")
+        );
+        assert_eq!(
+            uninstall_hooks(&target, agent).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
+        for path in [config, untouched] {
             let actual: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             assert_eq!(actual, user_config, "{}", path.display());

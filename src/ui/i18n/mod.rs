@@ -587,6 +587,7 @@ l10n_keys! {
     SettingsAgentGoose,
     SettingsAgentKimiCode,
     SettingsAgentQoderCLI,
+    SettingsAgentCrush,
     SettingsSearchAppHttpProxyKeywords,
     SettingsSearchAboutKeywords,
     SettingsSearchAutoDownloadKeywords,
@@ -642,6 +643,7 @@ l10n_keys! {
     SettingsSearchProgramKeywords,
     SettingsSearchQwenCodeKeywords,
     SettingsSearchQoderCLIKeywords,
+    SettingsSearchCrushKeywords,
     SettingsSearchRememberWindowSizeKeywords,
     SettingsSearchReportMouseToAppsKeywords,
     SettingsSearchRestoreLastLayoutKeywords,
@@ -1568,6 +1570,7 @@ mod tests {
             L10nKey::SettingsAgentPi,
             L10nKey::SettingsAgentQwenCode,
             L10nKey::SettingsAgentQoderCLI,
+            L10nKey::SettingsAgentCrush,
             // Windows names its backdrop materials, and Japanese Windows keeps
             // those names in Latin script — so does this list. Chinese does
             // translate them (云母 / 亚克力), which is what Microsoft's own
