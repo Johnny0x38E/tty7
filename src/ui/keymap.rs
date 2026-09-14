@@ -1,7 +1,7 @@
 use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
 
 use crate::core::actions::*;
-use crate::core::config::Config;
+use crate::core::config::{Config, KeybindingOverride};
 use crate::terminal::view::{
     AlternatePaste, ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious,
     InsertNewline, InsertNewlineFallback, PasteText,
@@ -106,9 +106,9 @@ pub fn rebind(cx: &mut App) {
 /// own `save()`, which fires on a sidebar drag — so it compares the triple
 /// before and after and only rebinds when one of these actually moved;
 /// otherwise each save would rebuild the keymap for nothing (#548).
-pub(crate) fn keybinding_config(cx: &App) -> (Vec<(String, String)>, String, String) {
+pub(crate) fn keybinding_config(cx: &App) -> (Vec<(String, KeybindingOverride)>, String, String) {
     let cfg = cx.global::<Config>();
-    let mut overrides: Vec<(String, String)> = cfg
+    let mut overrides: Vec<(String, KeybindingOverride)> = cfg
         .keybindings
         .iter()
         .map(|(a, k)| (a.clone(), k.clone()))
@@ -881,28 +881,114 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
     })
 }
 
-pub(crate) fn effective_bindings(cx: &App) -> Vec<(String, String)> {
-    let cfg = cx.global::<Config>();
-    let mut effective: Vec<(String, String)> = default_bindings()
-        .into_iter()
-        .map(|(a, k)| (a.to_string(), k.to_string()))
-        .collect();
-    for (action, key) in preset_bindings(&cfg.keybinding_preset, &cfg.prefix) {
-        set_binding(&mut effective, &action, key);
-    }
-    for (action, key) in &cfg.keybindings {
-        set_binding(&mut effective, action, key.clone());
-    }
-    effective
+/// One action and the chords it answers to, split by where they came from:
+/// the ones it ships with — its default, or the preset's in its place — and
+/// the ones `config.json` names.
+///
+/// Kept apart because they install apart. gpui resolves two bindings on one
+/// chord to the one added last, and a chord the user asked for by name has to
+/// be that one, wherever its action sits in the table.
+struct ActionChords {
+    action: String,
+    shipped: Vec<String>,
+    configured: Vec<String>,
 }
 
-fn set_binding(effective: &mut [(String, String)], action: &str, key: String) {
-    match effective.iter_mut().find(|(a, _)| a == action) {
-        Some(slot) => slot.1 = key,
-        // A hand-edited config.json with a typo used to vanish into this
-        // branch. The Keybindings page lists every name that works.
-        None => log::warn!("keybinding for unknown action {action:?} ignored"),
+fn resolve_chords(
+    preset: &str,
+    prefix: &str,
+    overrides: &std::collections::HashMap<String, KeybindingOverride>,
+) -> Vec<ActionChords> {
+    let mut resolved: Vec<ActionChords> = default_bindings()
+        .into_iter()
+        .map(|(action, key)| ActionChords {
+            action: action.to_string(),
+            shipped: [key]
+                .into_iter()
+                .filter(|k| !k.is_empty())
+                .map(str::to_string)
+                .collect(),
+            configured: Vec::new(),
+        })
+        .collect();
+    // A preset is a scheme rather than an addition: its chord takes the
+    // default's place.
+    for (action, key) in preset_bindings(preset, prefix) {
+        if let Some(slot) = resolved.iter_mut().find(|s| s.action == action) {
+            slot.shipped = vec![key];
+        }
     }
+    for (action, value) in overrides {
+        let Some(slot) = resolved.iter_mut().find(|s| s.action == *action) else {
+            // A hand-edited config.json with a typo used to vanish into this
+            // branch. The Keybindings page lists every name that works.
+            log::warn!("keybinding for unknown action {action:?} ignored");
+            continue;
+        };
+        match value {
+            // `""` has always been how a config retires a chord — the docs
+            // spell `"AlternatePaste": ""`, and Settings wrote it for an action
+            // whose chord was taken — so it goes on unbinding the action.
+            KeybindingOverride::Add(key) if key.is_empty() => {
+                slot.shipped.clear();
+            }
+            // A chord beside the ones the action has, not in place of them
+            // (#868): `"NextTab": "cmd-shift-]"` is a second way to switch tabs,
+            // and Ctrl+Tab going dead because of it was the bug.
+            KeybindingOverride::Add(key) => {
+                if !slot.shipped.iter().any(|k| same_chord(k, key)) {
+                    slot.configured.push(key.clone());
+                }
+            }
+            KeybindingOverride::Exact(keys) => {
+                slot.shipped.clear();
+                for key in keys {
+                    if !key.is_empty() && !slot.configured.iter().any(|k| same_chord(k, key)) {
+                        slot.configured.push(key.clone());
+                    }
+                }
+            }
+        }
+    }
+    resolved
+}
+
+/// Every chord as an `(action, chord)` pair, in the order the keymap is built
+/// from: all the shipped chords, then all the configured ones, so that a
+/// configured chord landing on another action's default is the binding that
+/// wins it. An action with no chord at all has no pair.
+fn flatten_chords(resolved: &[ActionChords]) -> Vec<(String, String)> {
+    let pairs = |pick: fn(&ActionChords) -> &Vec<String>| {
+        resolved
+            .iter()
+            .flat_map(move |s| pick(s).iter().map(|k| (s.action.clone(), k.clone())))
+    };
+    pairs(|s| &s.shipped)
+        .chain(pairs(|s| &s.configured))
+        .collect()
+}
+
+pub(crate) fn effective_bindings(cx: &App) -> Vec<(String, String)> {
+    let cfg = cx.global::<Config>();
+    flatten_chords(&resolve_chords(
+        &cfg.keybinding_preset,
+        &cfg.prefix,
+        &cfg.keybindings,
+    ))
+}
+
+/// Every action in table order with all of its chords, shipped first — an
+/// empty list for an action that has none. What a page listing the actions
+/// reads; the keymap reads [`effective_bindings`].
+pub(crate) fn effective_chords(cx: &App) -> Vec<(String, Vec<String>)> {
+    let cfg = cx.global::<Config>();
+    resolve_chords(&cfg.keybinding_preset, &cfg.prefix, &cfg.keybindings)
+        .into_iter()
+        .map(|mut s| {
+            s.shipped.append(&mut s.configured);
+            (s.action, s.shipped)
+        })
+        .collect()
 }
 
 fn preset_bindings(preset: &str, prefix: &str) -> Vec<(String, String)> {
@@ -1726,14 +1812,16 @@ mod tests {
         // one line in a `config.json`, so both are asserted against the whole
         // default table with that line applied — a bare one-entry table would
         // pass either assertion without the escape hatch working at all.
-        let mut retired = effective.clone();
-        set_binding(&mut retired, "AlternatePaste", String::new());
+        let with = |action: &str, value: KeybindingOverride| {
+            let overrides = std::collections::HashMap::from([(action.to_string(), value)]);
+            flatten_chords(&resolve_chords("default", "ctrl-b", &overrides))
+        };
+        let retired = with("AlternatePaste", KeybindingOverride::Add(String::new()));
         assert!(
             dispatched(&retired, "ctrl-v", "Terminal").is_empty(),
             "an emptied AlternatePaste gives Ctrl+V back to the shell"
         );
-        let mut everywhere = effective.clone();
-        set_binding(&mut everywhere, "PasteText", "ctrl-v".to_string());
+        let everywhere = with("PasteText", KeybindingOverride::Add("ctrl-v".to_string()));
         for context in ["Terminal", "Terminal alt_screen"] {
             assert!(
                 dispatched(&everywhere, "ctrl-v", context).contains(&PasteText::name_for_type()),
@@ -2200,23 +2288,25 @@ mod gpui_tests {
             {
                 let cfg = cx.global_mut::<Config>();
                 cfg.keybinding_preset = "tmux".to_string();
-                cfg.keybindings
-                    .insert("NewTab".to_string(), "secondary-shift-n".to_string());
+                cfg.keybindings.insert(
+                    "NewTab".to_string(),
+                    KeybindingOverride::Add("secondary-shift-n".to_string()),
+                );
             }
             rebind(cx);
 
             let eff = effective_bindings(cx);
-            let key_of = |action: &str| {
+            let keys_of = |action: &str| {
                 eff.iter()
-                    .find(|(a, _)| a == action)
+                    .filter(|(a, _)| a == action)
                     .map(|(_, k)| k.clone())
-                    .unwrap()
+                    .collect::<Vec<_>>()
             };
-            assert_eq!(key_of("NewTab"), "secondary-shift-n");
-            assert_eq!(key_of("SplitRight"), "ctrl-b %");
+            assert_eq!(keys_of("NewTab"), ["ctrl-b c", "secondary-shift-n"]);
+            assert_eq!(keys_of("SplitRight"), ["ctrl-b %"]);
             assert_eq!(
-                key_of("TogglePalette"),
-                per_platform("secondary-p", "secondary-shift-p")
+                keys_of("TogglePalette"),
+                [per_platform("secondary-p", "secondary-shift-p")]
             );
 
             cx.global_mut::<Config>().keybinding_preset = "default".to_string();
@@ -2251,9 +2341,10 @@ mod gpui_tests {
             assert_eq!(keybinding_config(cx), before);
 
             // A real binding edit moves it.
-            cx.global_mut::<Config>()
-                .keybindings
-                .insert("RenameTab".to_string(), "ctrl-shift-r".to_string());
+            cx.global_mut::<Config>().keybindings.insert(
+                "RenameTab".to_string(),
+                KeybindingOverride::Add("ctrl-shift-r".to_string()),
+            );
             assert_ne!(keybinding_config(cx), before);
 
             // So does the preset, and the prefix.
@@ -2280,7 +2371,6 @@ mod gpui_tests {
     /// What the live keymap dispatches for `keys` typed in a terminal, best
     /// match first — the first entry is the action a real keypress runs.
     fn fired(cx: &gpui::App, keys: &str) -> Vec<&'static str> {
-        use gpui::Action as _;
         let input: Vec<Keystroke> = keys
             .split(' ')
             .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))

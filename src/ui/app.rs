@@ -7194,16 +7194,32 @@ impl Tty7App {
         // only `same_chord` sees it. Compared as text, the displacement never
         // fires and both bindings survive onto that keystroke, where which one
         // wins is arbitrary (#750).
-        let displaced = crate::ui::keymap::effective_bindings(cx)
+        //
+        // Only that chord moves: the action that had it keeps any others it
+        // has, since an action can carry several (#868) and emptying it would
+        // take away keys that were never on this keystroke. An extra default —
+        // Alt+Enter beside Shift+Enter — follows its action's first chord rather
+        // than being one of its own, so its owner is unbound outright, as it
+        // always was.
+        use crate::ui::keymap::same_chord;
+        let displaced: Option<(String, Vec<String>)> = crate::ui::keymap::effective_chords(cx)
             .into_iter()
-            .chain(crate::ui::keymap::extra_bindings(cx))
-            .find(|(a, k)| *a != action && crate::ui::keymap::same_chord(k, &spec))
-            .map(|(a, _)| a);
+            .find(|(a, chords)| *a != action && chords.iter().any(|k| same_chord(k, &spec)))
+            .map(|(a, chords)| {
+                let rest = chords.into_iter().filter(|k| !same_chord(k, &spec));
+                (a, rest.collect())
+            })
+            .or_else(|| {
+                crate::ui::keymap::extra_bindings(cx)
+                    .into_iter()
+                    .find(|(a, k)| *a != action && same_chord(k, &spec))
+                    .map(|(a, _)| (a, Vec::new()))
+            });
         // A trailing "…" on an action name marks a command that opens
         // something; it is not punctuation, and inside a sentence it reads as
         // the sentence trailing off — "Rename Tab… took the shortcut from".
         let in_prose = |name: &str| name.trim_end_matches('…').to_string();
-        let note = displaced.as_ref().map(|other| {
+        let note = displaced.as_ref().map(|(other, _)| {
             t_fmt(
                 L10nKey::AppKeybindingDisplacedNote,
                 &[
@@ -7218,11 +7234,17 @@ impl Tty7App {
                 ],
             )
         });
+        // Both written as lists. Recording a shortcut sets it — the row showed
+        // one chord and now shows another — and a bare string in config adds a
+        // chord beside the default instead (#868).
         self.update_config(cx, |cfg| {
-            if let Some(other) = &displaced {
-                cfg.keybindings.insert(other.clone(), String::new());
+            use crate::core::config::KeybindingOverride;
+            if let Some((other, rest)) = &displaced {
+                cfg.keybindings
+                    .insert(other.clone(), KeybindingOverride::Exact(rest.clone()));
             }
-            cfg.keybindings.insert(action, spec);
+            cfg.keybindings
+                .insert(action, KeybindingOverride::Exact(vec![spec]));
         });
         crate::ui::keymap::rebind(cx);
         if let Some(s) = self.active_settings_mut() {
@@ -10441,11 +10463,7 @@ mod keybinding_gpui_tests {
         // the row showed one chord and now shows another. A bare string in
         // config adds a chord beside the default (#868), which is not what
         // the person at the row just did.
-        wait_for_binding(
-            &mut vcx,
-            "NewTab",
-            serde_json::json!(["secondary-shift-n"]),
-        );
+        wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["secondary-shift-n"]));
 
         let recording = app.update_in(&mut vcx, |app, _, _| {
             app.active_settings().map(|s| s.recording.is_some())
@@ -10471,16 +10489,13 @@ mod keybinding_gpui_tests {
     }
 
     #[gpui::test]
-    fn recording_a_chord_another_action_also_has_takes_only_that_chord(
-        cx: &mut TestAppContext,
-    ) {
+    fn recording_a_chord_another_action_also_has_takes_only_that_chord(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
         vcx.update(|_, cx| {
-            cx.global_mut::<Config>().keybindings =
-                serde_json::from_value(serde_json::json!({
-                    "NextTab": ["ctrl-tab", "secondary-alt-n"],
-                }))
-                .expect("the binding loads");
+            cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
+                "NextTab": ["ctrl-tab", "secondary-alt-n"],
+            }))
+            .expect("the binding loads");
             crate::ui::keymap::rebind(cx);
         });
         begin_capture(&app, &mut vcx, "NewTab");

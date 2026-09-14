@@ -110,6 +110,23 @@ impl serde::Serialize for FontFeatures {
     }
 }
 
+/// One action's line in `keybindings`.
+///
+/// The two shapes mean different things, so a save writes back whichever one
+/// was read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum KeybindingOverride {
+    /// `"NextTab": "cmd-shift-]"` — a chord *beside* the ones the action
+    /// already has, the way VS Code, Zed and kitty read a line like it (#868).
+    /// Empty unbinds the action, which is what `""` has always meant here.
+    Add(String),
+    /// `"NextTab": ["cmd-shift-]"]` — exactly these chords, replacing the
+    /// default and the preset's. `[]` unbinds. This is what the Settings page
+    /// writes, because recording a shortcut there sets it.
+    Exact(Vec<String>),
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
@@ -150,7 +167,7 @@ pub struct Config {
     pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
-    pub keybindings: HashMap<String, String>,
+    pub keybindings: HashMap<String, KeybindingOverride>,
     #[serde(default = "default_preset")]
     pub keybinding_preset: String,
     #[serde(default = "default_prefix")]
