@@ -381,6 +381,9 @@ pub struct TerminalView {
     /// time, however fast the pane is printing.
     pub(super) search_scan_armed: bool,
     pub bell_flash: bool,
+    /// Bumped by every bell, so only the timer armed by the latest one clears
+    /// the flash: a burst of bells holds one steady flash instead of strobing.
+    bell_epoch: u64,
     pub report_mouse: bool,
     last_at_prompt: bool,
     last_typeahead_blocked: bool,
@@ -1577,6 +1580,7 @@ impl TerminalView {
             search_scan_epoch: 0,
             search_scan_armed: false,
             bell_flash: false,
+            bell_epoch: 0,
             last_at_prompt: false,
             last_typeahead_blocked: false,
             running_since: None,
@@ -2980,6 +2984,8 @@ impl TerminalView {
     }
 
     fn flash_bell(&mut self, cx: &mut Context<Self>) {
+        self.bell_epoch += 1;
+        let epoch = self.bell_epoch;
         self.bell_flash = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -2987,6 +2993,12 @@ impl TerminalView {
                 .timer(std::time::Duration::from_millis(150))
                 .await;
             let _ = this.update(cx, |view, cx| {
+                // A bell rung since this one owns the flash now. Holding
+                // Backspace on an empty bash prompt rings at key-repeat rate,
+                // and clearing here would blank it every few frames (#874).
+                if view.bell_epoch != epoch {
+                    return;
+                }
                 view.bell_flash = false;
                 cx.notify();
             });
@@ -14308,6 +14320,40 @@ mod gpui_tests {
                 assert_eq!(view.title, "tty7 — process exited");
             })
             .unwrap();
+    }
+
+    /// Holding Backspace on an empty bash prompt (or Tab with nothing to
+    /// complete) rings the bell at key-repeat rate. Every flash used to arm its
+    /// own clear timer, so the first bell's timer blanked a flash the fifth bell
+    /// had just re-lit, and the pane strobed for as long as the key was held
+    /// (#874).
+    #[gpui::test]
+    fn a_bell_rung_at_key_repeat_rate_holds_one_steady_flash(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        let lit =
+            |cx: &mut TestAppContext| window.update(cx, |view, _, _| view.bell_flash).unwrap();
+
+        let repeat = std::time::Duration::from_millis(33);
+        let mut dark = Vec::new();
+        for i in 0..30 {
+            window
+                .update(cx, |view, _, cx| view.handle_event(AlacEvent::Bell, cx))
+                .unwrap();
+            cx.executor().advance_clock(repeat);
+            cx.run_until_parked();
+            if !lit(cx) {
+                dark.push(i);
+            }
+        }
+        assert!(
+            dark.is_empty(),
+            "the flash went dark between bells after repeats {dark:?}"
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        assert!(!lit(cx), "the flash outlived the last bell");
     }
 
     #[gpui::test]
