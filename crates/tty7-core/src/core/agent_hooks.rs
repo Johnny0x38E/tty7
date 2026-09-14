@@ -2554,7 +2554,11 @@ mod tests {
                         "--nocapture",
                     ])
                     .env(CASE_ENV, case)
-                    .env(ROOT_ENV, sandbox.path());
+                    .env(ROOT_ENV, sandbox.path())
+                    // `crush_settings_path` falls back to `$XDG_CONFIG_HOME`
+                    // before the sandbox home, and CI exports it. Neutralise it
+                    // so the default lands under the home this test owns.
+                    .env_remove("XDG_CONFIG_HOME");
                 match case {
                     "override" => {
                         child.env("CRUSH_GLOBAL_CONFIG", sandbox.path().join("custom config"))
