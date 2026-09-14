@@ -1290,6 +1290,8 @@ l10n_keys! {
     AppReopenTabFailed,
     AppOpenTerminalFailed,
     AppTabsNotRestored,
+    AppFullscreenEntered,
+    AppFullscreenEnteredNoKey,
     LaunchWorkspacesLeftRunning,
     AppSshConnectionFailed,
     AppSshReconnectFailed,

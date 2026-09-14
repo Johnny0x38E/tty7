@@ -626,8 +626,8 @@ pub(crate) fn trailing_chrome_tiles_w() -> f32 {
 /// Anything else drawn into that end of the title bar has to stop short of it —
 /// which for the hoisted document header means the case where the detail panel
 /// is closed and the document column runs to the window's right edge.
-pub(crate) fn trailing_chrome_w() -> f32 {
-    trailing_chrome_tiles_w() + crate::ui::app::WINDOW_CONTROLS_W
+pub(crate) fn trailing_chrome_w(fullscreen: bool) -> f32 {
+    trailing_chrome_tiles_w() + crate::ui::app::window_controls_w(fullscreen)
 }
 
 pub(crate) fn chrome_tile_sized(
@@ -1812,14 +1812,15 @@ impl Tty7App {
         // instead: that header carries no fill of its own, and a chip left
         // under it showed through the file name while staying clickable.
         let document_w = self.document_dock_px(window, cx).unwrap_or(0.);
+        let controls_w = crate::ui::app::window_controls_w(window.is_fullscreen());
         let strip_w = if cfg!(target_os = "macos") {
             (window.viewport_size().width - px(80. + panel_w + document_w)).max(px(160.))
         } else {
-            (window.viewport_size().width - px(114.)).max(px(140.))
+            (window.viewport_size().width - px(crate::ui::app::TITLE_BAR_LEAD + controls_w))
+                .max(px(140.))
         };
-        let chrome_band_w = (!cfg!(target_os = "macos") && self.right_panel_open(cx)).then(|| {
-            (self.right_panel_px(window, cx) - crate::ui::app::WINDOW_CONTROLS_W - 1.).max(0.)
-        });
+        let chrome_band_w = (!cfg!(target_os = "macos") && self.right_panel_open(cx))
+            .then(|| (self.right_panel_px(window, cx) - controls_w - 1.).max(0.));
         // `corner_w` reserves the trailing window chrome. With the panel open on
         // macOS that chrome belongs to the panel's own header, which the strip
         // now stops short of, so reserving for it here would charge the chips
