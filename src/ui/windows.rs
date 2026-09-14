@@ -1019,6 +1019,9 @@ mod tests {
         // The Dock icon after the last window retired to the tray: the
         // process is alive with nothing on screen, and the click has to bring
         // back the layout that was there, not mint a blank workspace beside it.
+        // The restore saves `views.json`; run alone, this test would otherwise
+        // write it into the real config dir.
+        crate::core::config::pin_test_config_dir();
         let view = WindowView::default();
         let restored = view.id;
         let mut opened = None;
