@@ -480,6 +480,30 @@ fn open_missing_cli_window_with(
     announce_detached_at_launch(cx, restore);
 }
 
+/// Brings the UI back when macOS relaunches a tty7 that is already running.
+///
+/// AppKit only asks when it found no visible window, and that is a state
+/// tty7 lives in on purpose: closing the last window with the tray icon on
+/// retires to the tray, process alive and Dock icon up. A window that is
+/// still there is activated rather than doubled — `activate_window` is
+/// `makeKeyAndOrderFront:`, which is what orders a window AppKit left behind
+/// back to the front. None at all gets the last layout back the way a
+/// pathless launch and the tray's windowless path do, so the workspace that
+/// retired is the one that returns and not a blank one beside it.
+pub fn reopen(cx: &mut App) {
+    reopen_with(cx, open_at);
+}
+
+fn reopen_with(
+    cx: &mut App,
+    open: impl FnOnce(&mut App, Option<WorkspaceId>, Option<std::path::PathBuf>),
+) {
+    match WindowRegistry::most_recent(cx) {
+        Some(workspace) => activate(cx, workspace),
+        None => open_missing_cli_window_with(cx, None, open),
+    }
+}
+
 pub fn refresh_menu(cx: &mut App) {
     crate::ui::theme::set_menus(cx);
 }
@@ -986,6 +1010,68 @@ mod tests {
         });
 
         assert_eq!(opened, Some((None, None)));
+    }
+
+    #[gpui::test]
+    fn a_reopen_with_no_window_up_restores_the_workspace_that_retired(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The Dock icon after the last window retired to the tray: the
+        // process is alive with nothing on screen, and the click has to bring
+        // back the layout that was there, not mint a blank workspace beside it.
+        // The restore saves `views.json`; run alone, this test would otherwise
+        // write it into the real config dir.
+        crate::core::config::pin_test_config_dir();
+        let view = WindowView::default();
+        let restored = view.id;
+        let mut opened = None;
+
+        cx.update(|cx| {
+            WindowRegistry::init(cx);
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: Some(restored),
+                },
+            );
+            reopen_with(cx, |_, workspace, path| {
+                opened = Some((workspace, path));
+            });
+        });
+
+        assert_eq!(opened, Some((Some(restored), None)));
+    }
+
+    #[gpui::test]
+    fn a_reopen_with_a_window_up_activates_it_instead_of_opening_another(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // AppKit also asks while a window is still there but off screen. That
+        // window is the thing to activate; a second one would take the
+        // restore away from it.
+        use gpui::VisualContext as _;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let handle = vcx.window_handle();
+        app.update_in(&mut vcx, |_, _, cx| {
+            WindowRegistry::init(cx);
+            let view = WindowView::default();
+            let open = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![view],
+                    active: Some(open),
+                },
+            );
+            WindowRegistry::register(cx, open, handle, app.downgrade());
+
+            reopen_with(cx, |_, workspace, _| {
+                panic!("a reopen with a window up opened another for {workspace:?}");
+            });
+            assert_eq!(WindowRegistry::count(cx), 1);
+        });
     }
 
     #[gpui::test]
