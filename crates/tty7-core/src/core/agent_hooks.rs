@@ -1440,14 +1440,34 @@ export default function (pi: ExtensionAPI) {{
   // Extension load = the agent is running in this pane. No context here yet,
   // so the id rides on session_start instead.
   emit("session-start");
-  pi.on("agent_start", (_event, ctx) => emit("prompt-submit", ctx));
-  pi.on("agent_end", (_event, ctx) => emit("stop", ctx));
+  // What the pane showed before a UI prompt put it on "waiting", so closing
+  // the prompt can put it back.
+  let turn = "session-start";
+  pi.on("agent_start", (_event, ctx) => emit((turn = "prompt-submit"), ctx));
+  pi.on("agent_end", (_event, ctx) => emit((turn = "stop"), ctx));
   pi.on("session_shutdown", (_event, ctx) => emit("session-end", ctx));
   // Last, and guarded: the three above already worked, so a Pi build that
   // rejects this event name must not take them — or the whole extension —
   // down with it.
   try {{
     pi.on("session_start", (_event, ctx) => emit("session-start", ctx));
+  }} catch {{}}
+  // Pi-only: Oh My Pi may not expose the UI-prompt hooks, so each one is
+  // guarded on its own — a fork that rejects the event name must not take the
+  // rest of the bridge down with it. Without these the pane never reports
+  // "waiting for you" while a dialog is open, and the event vocabulary already
+  // carries question-asked / permission-request for exactly that.
+  try {{
+    pi.on("ui_prompt_start", (event, ctx) => {{
+      emit(event.kind === "confirm" ? "permission-request" : "question-asked", ctx);
+    }});
+  }} catch {{}}
+  // The dialog closed: restore what it interrupted. Not a blanket
+  // prompt-submit — Pi also prompts while idle (/model, a command's select),
+  // and that would leave a finished pane reading "working" with no turn to
+  // ever end it.
+  try {{
+    pi.on("ui_prompt_end", (_event, ctx) => emit(turn, ctx));
   }} catch {{}}
 }}
 "#
@@ -2205,12 +2225,18 @@ mod tests {
                 "agent_start",
                 "agent_end",
                 "session_shutdown",
+                "ui_prompt_start",
+                "ui_prompt_end",
             ] {
                 assert!(
                     bridge.contains(&format!(r#"pi.on("{event}""#)),
                     "{slug} bridge subscribes to {event}"
                 );
             }
+            assert!(
+                bridge.contains(r#"pi.on("ui_prompt_end", (_event, ctx) => emit(turn, ctx))"#),
+                "{slug} restores the pre-prompt status rather than forcing working"
+            );
         }
         assert!(
             pi_extension_ts(&target, HookAgent::Claude).is_none(),
