@@ -2273,7 +2273,8 @@ impl TerminalView {
         let kitty = self.key_flags();
         if let Some(bytes) = super::input::keystroke_to_bytes(ks, kitty) {
             let plain = !m.control && !m.alt && !m.platform;
-            let interrupt = is_typeahead_interrupt(ks.key.as_str(), m);
+            let boundary = typeahead_boundary(ks.key.as_str(), m);
+            let interrupt = boundary.is_some();
             let shell_owns_prompt = self.shell_owns_prompt();
             let held = plain
                 && ks.key == "backspace"
@@ -2290,11 +2291,11 @@ impl TerminalView {
                 };
             if !held {
                 self.release_hold();
-                if !shell_owns_prompt && interrupt {
+                if let Some(boundary) = boundary.filter(|_| !shell_owns_prompt) {
                     // Ctrl-C interrupts and Ctrl-D can close the foreground reader.
                     // Discard the gap before sending either so a prompt transition
                     // cannot turn the pending record into a later Ctrl-U.
-                    self.observe_typeahead(RawInput::Interrupt);
+                    self.observe_typeahead(boundary);
                 }
                 self.terminal.write(bytes);
                 if !shell_owns_prompt && !interrupt {
@@ -6728,8 +6729,15 @@ impl TerminalView {
     }
 }
 
-fn is_typeahead_interrupt(key: &str, modifiers: &Modifiers) -> bool {
-    modifiers.control && !modifiers.alt && !modifiers.platform && matches!(key, "c" | "d")
+fn typeahead_boundary(key: &str, modifiers: &Modifiers) -> Option<RawInput<'static>> {
+    if !modifiers.control || modifiers.alt || modifiers.platform {
+        return None;
+    }
+    match key {
+        "c" => Some(RawInput::Interrupt),
+        "d" => Some(RawInput::EndOfInput),
+        _ => None,
+    }
 }
 
 fn sync_typeahead_owner_state(
@@ -7871,8 +7879,8 @@ mod tests {
     use super::{
         COMPLETION_MENU_MAX_W, LoopbackPlan, PortRoute, RawInput, SelectEndCopy, Typeahead,
         WheelRoute, clipboard_paste_text, compose_notification_title, cwd_is_on_host,
-        display_width, is_typeahead_interrupt, link_path_style, loopback_plan,
-        observe_typeahead_for_owner,
+        display_width, link_path_style, loopback_plan, observe_typeahead_for_owner,
+        typeahead_boundary,
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
@@ -8050,17 +8058,23 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        assert!(is_typeahead_interrupt("c", &ctrl));
-        assert!(is_typeahead_interrupt("d", &ctrl));
-        assert!(!is_typeahead_interrupt("u", &ctrl));
+        assert!(matches!(
+            typeahead_boundary("c", &ctrl),
+            Some(RawInput::Interrupt)
+        ));
+        assert!(matches!(
+            typeahead_boundary("d", &ctrl),
+            Some(RawInput::EndOfInput)
+        ));
+        assert!(typeahead_boundary("u", &ctrl).is_none());
 
         let ctrl_alt = Modifiers {
             control: true,
             alt: true,
             ..Default::default()
         };
-        assert!(!is_typeahead_interrupt("c", &ctrl_alt));
-        assert!(!is_typeahead_interrupt("d", &ctrl_alt));
+        assert!(typeahead_boundary("c", &ctrl_alt).is_none());
+        assert!(typeahead_boundary("d", &ctrl_alt).is_none());
     }
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
@@ -11014,16 +11028,18 @@ mod gpui_tests {
 
     #[gpui::test]
     fn passthrough_ctrl_c_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
-        assert_foreground_interrupt_does_not_wipe_prompt(cx, "ctrl-c", 0x03);
+        assert_foreground_interrupt_does_not_wipe_prompt(cx, "agent input", "ctrl-c", 0x03);
     }
 
     #[gpui::test]
     fn passthrough_ctrl_d_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
-        assert_foreground_interrupt_does_not_wipe_prompt(cx, "ctrl-d", 0x04);
+        // Ctrl-D only ends input on an empty line; with text it is an edit.
+        assert_foreground_interrupt_does_not_wipe_prompt(cx, "", "ctrl-d", 0x04);
     }
 
     fn assert_foreground_interrupt_does_not_wipe_prompt(
         cx: &mut TestAppContext,
+        pending: &str,
         chord: &str,
         byte: u8,
     ) {
@@ -11031,7 +11047,7 @@ mod gpui_tests {
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active(), "the foreground process owns input");
-                view.typeahead.observe(RawInput::Text("agent input"), false);
+                view.typeahead.observe(RawInput::Text(pending), false);
                 view.typeahead.observe(
                     RawInput::Key {
                         key: "up",

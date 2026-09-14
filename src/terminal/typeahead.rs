@@ -19,6 +19,11 @@ pub enum RawInput<'a> {
         plain: bool,
     },
     Interrupt,
+    /// Ctrl-D. Readers take it as end of input only on an empty line — on a
+    /// line with text it deletes a character, and a shell that reads the gap
+    /// later is still left holding that text — so it closes the record only
+    /// when nothing unsubmitted was typed.
+    EndOfInput,
 }
 
 impl Typeahead {
@@ -29,7 +34,9 @@ impl Typeahead {
     pub fn observe(&mut self, input: RawInput, externally_owned: bool) {
         match input {
             RawInput::Interrupt => self.discard(),
+            RawInput::EndOfInput if self.text.is_empty() => self.discard(),
             _ if externally_owned => {}
+            RawInput::EndOfInput => self.taint(),
             RawInput::Text(s) => self.record_text(s),
             RawInput::Pasted(s) => {
                 self.record_text(s);
@@ -379,6 +386,36 @@ mod tests {
         p.taint();
         p.record_text("ls");
         assert_eq!(p.drain(), Some(String::new()));
+    }
+
+    #[test]
+    fn end_of_input_on_an_empty_line_closes_the_record() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("exit"), false);
+        t.observe(
+            RawInput::Key {
+                key: "enter",
+                plain: true,
+            },
+            false,
+        );
+        t.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+        t.observe(RawInput::EndOfInput, false);
+        assert_eq!(t.drain(), None);
+    }
+
+    #[test]
+    fn end_of_input_after_unsubmitted_text_still_owes_the_wipe() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("ab"), false);
+        t.observe(RawInput::EndOfInput, false);
+        assert_eq!(t.drain(), Some(String::new()));
     }
 
     #[test]
