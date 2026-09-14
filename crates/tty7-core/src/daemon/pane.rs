@@ -5125,6 +5125,7 @@ mod tests {
             rich: true,
             cwd: None,
             activity: 0,
+            turns: 0,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

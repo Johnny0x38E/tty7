@@ -4834,7 +4834,7 @@ impl Tty7App {
                 refocus.as_ref().map(|s| s.entity_id()) == Some(leaf.entity_id());
             leaf.update(cx, |view, cx| {
                 if view.agent_session().map(|s| s.status) == Some(AgentStatus::Done) {
-                    view.mark_agent_result_unread(refocus_incoming);
+                    view.mark_agent_result_unread(refocus_incoming, cx);
                     cx.notify();
                 }
             });
