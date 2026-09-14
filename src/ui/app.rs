@@ -852,6 +852,7 @@ pub struct Tty7App {
     pub(crate) font_family: String,
     pub(crate) font_family_bold: Option<String>,
     pub(crate) font_family_italic: Option<String>,
+    pub(crate) font_fallbacks: Vec<String>,
     pub(crate) font_features: Option<gpui::FontFeatures>,
     terminal_cursor_style: ConfigCursorStyle,
     terminal_scrollback_limit: usize,
@@ -1323,6 +1324,7 @@ impl Tty7App {
             font_family,
             font_family_bold,
             font_family_italic,
+            font_fallbacks,
             font_features,
             terminal_cursor_style,
             terminal_scrollback_limit,
@@ -1334,6 +1336,7 @@ impl Tty7App {
                 cfg.font_family.clone(),
                 cfg.font_family_bold.clone(),
                 cfg.font_family_italic.clone(),
+                cfg.font_fallbacks.clone(),
                 cfg.font_features
                     .as_ref()
                     .map(crate::core::config::gpui_font_features),
@@ -1469,6 +1472,7 @@ impl Tty7App {
             font_family,
             font_family_bold,
             font_family_italic,
+            font_fallbacks,
             font_features,
             terminal_cursor_style,
             terminal_scrollback_limit,
@@ -6336,12 +6340,13 @@ impl Tty7App {
             self.terminal_scrollback_limit = config.scrollback_limit;
             self.apply_terminal_config_to_panes(&config, cx);
         }
-        let (font_size, line_height, font_family, font_features) = {
+        let (font_size, line_height, font_family, font_fallbacks, font_features) = {
             let cfg = cx.global::<Config>();
             (
                 cfg.font_size,
                 cfg.line_height,
                 cfg.font_family.clone(),
+                cfg.font_fallbacks.clone(),
                 cfg.font_features
                     .as_ref()
                     .map(crate::core::config::gpui_font_features),
@@ -6381,6 +6386,21 @@ impl Tty7App {
                 for leaf in tab.pane.terminals() {
                     let family = font_family.clone();
                     leaf.update(cx, |v, cx| v.set_font_family(family, cx));
+                }
+            }
+        }
+        // A `font_fallbacks` edit on its own reached no live pane at all: the
+        // chain is built once per view and from then on only cloned around.
+        // `set_font_family` rereads it too, so an edit that moves both ends up
+        // building the same chain twice rather than disagreeing about it.
+        if font_fallbacks != self.font_fallbacks {
+            self.font_fallbacks = font_fallbacks;
+            for tab in &self.tabs {
+                for leaf in tab.pane.terminals() {
+                    leaf.update(cx, |v, cx| {
+                        v.reread_fallback_chain(cx);
+                        cx.notify();
+                    });
                 }
             }
         }
