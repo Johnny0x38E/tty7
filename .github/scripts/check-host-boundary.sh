@@ -59,6 +59,9 @@ src/ui/app.rs|std::fs::create_dir_all
 src/ui/ssh_prompt.rs|std::fs::read
 src/ui/ssh_connect.rs|std::fs::read
 src/ui/settings.rs|std::fs::read
+# The host editor asking which of those keys is on this machine before it offers
+# a passphrase box for one — the same client-side key, never a workspace path.
+src/ui/settings.rs|std::fs::metadata
 
 # Shell history lives in the local user's home (`~/.zsh_history` &co.) and backs
 # this app's own history search. A remote pane's history is the remote shell's
