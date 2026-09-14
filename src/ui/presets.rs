@@ -523,10 +523,39 @@ fn channel_distance(a: u32, b: u32) -> u32 {
     d(16).max(d(8)).max(d(0))
 }
 
-fn contrast(a: u32, b: u32) -> f32 {
+pub(crate) fn contrast(a: u32, b: u32) -> f32 {
     let (l1, l2) = (relative_luminance(a), relative_luminance(b));
     let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
     (hi + 0.05) / (lo + 0.05)
+}
+
+/// The opaque ink SGR 2 (faint) text is painted in on a light cell, when the
+/// plain fade would drop it under the text floor — `None` when the fade is
+/// already legible and should stay a fade.
+///
+/// Faint text is `opacity` of its ink over the cell. That costs a fixed share
+/// of the ink's luminance distance, and on a light background the ratio that
+/// distance buys collapses fast: Catppuccin Latte's own foreground fades from
+/// 7.1:1 to 3.2:1, and every bright-black the palette rescue lifted to 4.5:1
+/// fades back to 2.5:1 — the "illegible secondary text" of #858. So the fade
+/// is walked back toward the ink until it clears `TEXT_FLOOR` again, capped at
+/// the ink's own ratio: text that was never above the floor is left as dim as
+/// it would have been undimmed, not darkened past what the app asked for.
+///
+/// Light backgrounds only. Dark themes read the same faint text at the same
+/// ratios without complaint, and keeping them byte-for-byte as they were is
+/// worth more than a symmetric rule nobody asked for. The test is the cell's
+/// own background, so a light cell inside a dark theme is rescued too.
+pub(crate) fn legible_dim(ink: u32, bg: u32, opacity: f32) -> Option<u32> {
+    if is_dark(bg) {
+        return None;
+    }
+    let faded = mix(bg, ink, opacity);
+    let floor = TEXT_FLOOR.min(contrast(ink, bg));
+    if contrast(faded, bg) >= floor {
+        return None;
+    }
+    Some(bisect_contrast(faded, ink, bg, floor))
 }
 
 fn is_dark(bg: u32) -> bool {
