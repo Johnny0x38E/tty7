@@ -861,15 +861,16 @@ const QODER_HOOK_EVENTS: &[(&str, &str)] = &[
 ];
 
 /// Crush currently fires exactly one hook, `PreToolUse`, before every
-/// top-level tool call and before its permission check. There is no turn
-/// boundary to report, so a tool call is the only evidence that Crush is
-/// working at all: it maps to `prompt-submit`, and the pane is cleared when
-/// Crush exits and the foreground process goes back to the shell.
+/// top-level tool call and before its permission check. Its payload still
+/// carries `session_id` and `cwd`, which is what resume needs.
 ///
-/// The cost is that a turn cannot report done: `tty7 wait` will time out
-/// rather than return. That is Crush's limitation, not tty7's; when it ships
-/// `UserPromptSubmit`/`Stop` and friends, they slot in here.
-const CRUSH_HOOK_EVENTS: &[(&str, &str)] = &[("PreToolUse", "prompt-submit")];
+/// It maps to `tool-complete`, not `prompt-submit`: with no `Stop` to follow,
+/// a turn started here would never end, and a pane stuck on working asks
+/// before every close and holds the tray and `tty7 wait` on a turn long over.
+/// `tool-complete` records the session and bumps the activity counter while
+/// leaving the status alone. When Crush ships `UserPromptSubmit`/`Stop` and
+/// friends, they slot in here.
+const CRUSH_HOOK_EVENTS: &[(&str, &str)] = &[("PreToolUse", "tool-complete")];
 
 fn hook_map_state(
     target: &HookTarget,
@@ -1858,6 +1859,26 @@ mod tests {
         assert_eq!(state.status, AgentStatus::Done);
     }
 
+    /// Crush's lone `PreToolUse` has no `Stop` to close a turn behind it, so it
+    /// must not open one: the pane would read as busy until Crush exits.
+    #[test]
+    fn crush_tool_calls_record_the_session_without_starting_a_turn() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        let mut state = AgentSessionState::default();
+        for (hook, event) in HookAgent::Crush.hook_map_events().unwrap() {
+            assert_eq!(*hook, "PreToolUse");
+            let input =
+                r#"{"event":"PreToolUse","session_id":"c-1","cwd":"/repo","tool_name":"bash"}"#;
+            let event = effective_event("crush", event, input).unwrap();
+            state.apply_event(&round_trip("crush", event, input));
+        }
+        assert_eq!(state.status, AgentStatus::Idle);
+        assert_eq!(state.session_id.as_deref(), Some("c-1"));
+        assert_eq!(state.cwd.as_deref(), Some(Path::new("/repo")));
+        assert_eq!(state.activity, 1);
+    }
+
     /// Qwen is the one agent that reports a blocked turn outright, so it must
     /// not also carry the `Notification` hook the others need — that event fires
     /// for non-blocking alerts too and would strand the pane on "waiting".
@@ -2502,10 +2523,10 @@ mod tests {
             ours[0]["command"].as_str(),
             Some(
                 target
-                    .hook_command(HookAgent::Crush, "prompt-submit")
+                    .hook_command(HookAgent::Crush, "tool-complete")
                     .as_str()
             ),
-            "the entry is flat and names the prompt-submit emitter"
+            "the entry is flat and names the tool-complete emitter"
         );
         assert!(
             ours[0].get("hooks").is_none(),

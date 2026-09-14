@@ -23,9 +23,9 @@ becomes **Reinstall** — or **Update**, against an **Outdated** state, when tty
 ships a newer hook.
 
 <Note>
-  Crush ships only a `PreToolUse` hook today, so it reports **working** — a
-  tool call is the only turn signal there is — but never **done**. On a Crush
-  pane, `tty7 wait` times out rather than returning.
+  Crush ships only a `PreToolUse` hook today. It is enough to remember the
+  session for resume, but there is no turn boundary behind it, so a Crush pane
+  carries no status dot and `tty7 wait` times out rather than returning.
 </Note>
 
 <Note>
