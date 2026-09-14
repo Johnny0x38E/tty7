@@ -676,6 +676,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentQwenCode => "Qwen Code",
         L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsAgentKimiCode => "Kimi Code",
+        L10nKey::SettingsAgentQoderCLI => "Qoder CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
         }
@@ -811,6 +812,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchKimiCodeKeywords => {
             "Kimi Code 月之暗面 agent 集成 钩子 安装 kimi code moonshot agent integration hooks install"
         }
+        L10nKey::SettingsSearchQoderCLIKeywords => "Qoder CLI agent 集成 钩子 安装 qoder qodercli",
         L10nKey::SettingsSearchPiKeywords => {
             "Pi agent 集成 扩展 安装 pi agent integration extension install"
         }
@@ -1020,6 +1022,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSessionSubtitle => "会话",
         L10nKey::PanelProcessesSubtitle => "进程",
         L10nKey::PanelPortsSubtitle => "端口",
+        L10nKey::PanelLatency => "延迟",
         L10nKey::PanelPortsUnsupported => "对端的 tty7-server 太旧，列不出端口。",
         L10nKey::PanelPortsProbeFailed => "没能查出这个窗格在监听什么。",
         L10nKey::PanelPortsRestricted => "这里有以其他用户身份运行的进程，看不到它们的端口。",

@@ -6820,6 +6820,11 @@ impl Render for TerminalView {
 
         div()
             .id("terminal-surface")
+            // The surface, not the grid inside it, is what carries the role:
+            // a11y focus is only ever reported for a `div` that tracks a focus
+            // handle *and* has a node of its own, so a terminal with no role
+            // here is a window whose focused element is the window.
+            .role(gpui::Role::MultilineTextInput)
             .track_focus(&self.focus_handle)
             .key_context(self.key_context())
             .size_full()

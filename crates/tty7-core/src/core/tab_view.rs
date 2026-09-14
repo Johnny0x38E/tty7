@@ -91,6 +91,73 @@ pub fn strip_host_prefix(raw: &str) -> &str {
     }
 }
 
+/// The marks a coding agent writes in front of the title it sets while it
+/// works, and which of them to take back off.
+///
+/// Agents animate in the terminal title and do not agree on an alphabet:
+/// Claude Code cycles the quadrant circles and rests on an asterisk, others
+/// step through the braille frames, some write nothing. Rendered as they
+/// arrive, a column of tabs carries a mark in front of some rows and not
+/// others, in three vocabularies, while the row already says what the agent is
+/// doing — in one, with its status dot.
+///
+/// **A known alphabet, not a shape.** The obvious rule — a leading character
+/// that is non-ASCII and above some code point, followed by a space — matches
+/// by shape, and a tab called `🔥 build`, or `📁 ~/repo` from somebody's shell
+/// integration, fits it exactly and loses its first character with no way to
+/// ask for it back and no clue as to what took it. Matching a list of marks we
+/// have actually seen costs the same and cannot do that. When an agent invents
+/// a mark that is not here yet the failure is today's behaviour — the mark
+/// stays — which is the safe direction to fail in, and adding it is a line in
+/// the table below.
+const STATUS_MARKS: &[char] = &[
+    // Claude Code: the quadrant circles while it works, the asterisk at rest.
+    '\u{25D0}', '\u{25D1}', '\u{25D2}', '\u{25D3}', '\u{2733}',
+];
+
+/// Whether `c` is one of the braille cells the common spinners are built from.
+/// The whole block, because the frame sets differ between agents and every
+/// cell in it is a spinner frame somewhere — none is a character a human puts
+/// at the front of a tab's name.
+fn is_braille_frame(c: char) -> bool {
+    ('\u{2800}'..='\u{28FF}').contains(&c)
+}
+
+/// `title` with any leading status marks taken off.
+///
+/// A mark only counts with whitespace behind it, which is how every agent
+/// writes one and is one more thing a title would have to do by accident.
+/// Variation selectors and zero-width joiners ride along with the mark.
+pub fn strip_status_mark(title: &str) -> &str {
+    let mut rest = title;
+    loop {
+        let mut chars = rest.chars();
+        let Some(first) = chars.next() else {
+            return rest;
+        };
+        if !STATUS_MARKS.contains(&first) && !is_braille_frame(first) {
+            return rest;
+        }
+        let after = chars
+            .as_str()
+            .trim_start_matches(|c: char| matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{200D}'));
+        let trimmed = after.trim_start();
+        // Nothing between the mark and the rest of the title: a title that
+        // happens to start with the character, not a mark in front of one.
+        if trimmed.len() == after.len() {
+            return rest;
+        }
+        // A mark with nothing behind it is the whole title. Taking it would
+        // leave an empty string, and an empty title is not a tab called
+        // nothing — it is a tab that falls back to its number, which is less
+        // than the mark was saying.
+        if trimmed.is_empty() {
+            return rest;
+        }
+        rest = trimmed;
+    }
+}
+
 impl TabView {
     pub fn label(&self) -> TabLabel<'_> {
         if let Some(name) = self
@@ -105,6 +172,7 @@ impl TabView {
             .osc_title
             .as_deref()
             .map(str::trim)
+            .map(strip_status_mark)
             .filter(|t| !t.is_empty())
         {
             return TabLabel::Osc(title);
@@ -159,6 +227,72 @@ pub fn tab_views_of(ws: &Workspace, panes: &[PaneRecord]) -> Vec<TabView> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The marks come off, whichever alphabet the agent picked.
+    #[test]
+    fn a_status_mark_comes_off_the_front_of_a_title() {
+        for raw in [
+            "\u{2733} fixing the switcher", // Claude Code at rest
+            "\u{25D0} fixing the switcher", // and while it works
+            "\u{25D3} fixing the switcher",
+            "\u{280B} fixing the switcher",          // a braille frame
+            "\u{28FF} fixing the switcher",          // the far end of the block
+            "\u{2733}\u{FE0F} fixing the switcher",  // with an emoji selector
+            "\u{2733} \u{280B} fixing the switcher", // two of them, both go
+        ] {
+            assert_eq!(strip_status_mark(raw), "fixing the switcher", "on {raw:?}");
+        }
+    }
+
+    /// The reason this matches an alphabet rather than a shape. Every one of
+    /// these fits "leading non-ASCII character above U+2000, then a space",
+    /// and every one of them is somebody's title rather than an agent's mark —
+    /// a shape rule eats the first character of each, silently.
+    #[test]
+    fn a_title_that_merely_looks_like_one_is_left_alone() {
+        for raw in [
+            "\u{1F525} build",        // fire, a name somebody chose
+            "\u{1F4C1} ~/repo",       // folder, from a shell integration
+            "\u{2192} deploy",        // an arrow
+            "\u{2714} done",          // a tick
+            "\u{2022} notes",         // a bullet
+            "\u{4E2D}\u{6587} title", // a title in a script with no case
+            "\u{2733}fixing",         // no space: part of the word
+            "fixing the switcher",    // nothing to take
+            "",
+        ] {
+            assert_eq!(strip_status_mark(raw), raw, "on {raw:?}");
+        }
+    }
+
+    /// A name the user typed is theirs, mark or no mark. The strip is for the
+    /// title an agent writes, and `label` reaches the name first — but that
+    /// ordering is the only thing keeping a tab someone deliberately called
+    /// `\u{2733} release` from being renamed behind their back, so it is worth
+    /// saying out loud.
+    #[test]
+    fn a_name_the_user_gave_is_never_stripped() {
+        let view = TabView {
+            id: TabId::new(),
+            name: Some("\u{2733} release".to_string()),
+            title: "zsh".to_string(),
+            osc_title: Some("\u{2733} fixing the switcher".to_string()),
+            cwd: None,
+            agent: None,
+            status: None,
+            live: true,
+            panes: 1,
+        };
+        assert_eq!(view.label(), TabLabel::Named("\u{2733} release"));
+    }
+
+    /// A title that is only a mark keeps it, rather than becoming empty and
+    /// falling through to the tab's number.
+    #[test]
+    fn a_mark_on_its_own_is_still_a_title() {
+        assert_eq!(strip_status_mark("\u{2733}"), "\u{2733}");
+        assert_eq!(strip_status_mark("\u{2733} "), "\u{2733} ");
+    }
     use super::*;
     use crate::core::machine::{AgentFacts, Tab};
 
@@ -196,7 +330,7 @@ mod tests {
             cwd: Some("/work".into()),
             ..view()
         };
-        assert_eq!(titled.label(), TabLabel::Osc("✳ fixing the switcher"));
+        assert_eq!(titled.label(), TabLabel::Osc("fixing the switcher"));
 
         let blank_title = TabView {
             osc_title: Some("   ".into()),

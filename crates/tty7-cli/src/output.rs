@@ -526,12 +526,15 @@ mod tests {
         );
         // What the pane's own terminal says it is doing beats naming the agent
         // running it — every tab of a workspace would otherwise read alike.
+        // The mark the agent writes in front of that title comes off here too:
+        // `tab_label` reads `TabView::label`, so the table says what the tab
+        // strip says without either being told about the other.
         assert_eq!(
             tab_label(&view(&|v| {
                 v.osc_title = Some("✳ fixing the switcher".into());
                 v.agent = Some(tty7_core::core::cli_agent::CLIAgent::Claude);
             })),
-            "✳ fixing the switcher"
+            "fixing the switcher"
         );
         assert_eq!(
             tab_label(&view(

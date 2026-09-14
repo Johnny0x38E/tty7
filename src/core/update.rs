@@ -1766,6 +1766,11 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
+#[derive(serde::Deserialize)]
+struct GitHubError {
+    message: String,
+}
+
 /// `nightly.json`, written by the nightly workflow. Only `version` is read
 /// today; the rest is there so a build can be traced back to its commit
 /// without cross-referencing the release notes.
@@ -1853,7 +1858,30 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
     let mut response = client.send(request).await.context("sending the request")?;
 
     if !response.status().is_success() {
-        anyhow::bail!("GitHub returned HTTP {}", response.status().as_u16());
+        let status = response.status().as_u16();
+        let rate_remaining = response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let rate_reset = response
+            .headers()
+            .get("x-ratelimit-reset")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let mut body = Vec::new();
+        let _ = response
+            .body_mut()
+            .take(8 * 1024)
+            .read_to_end(&mut body)
+            .await;
+        anyhow::bail!(github_http_error(
+            status,
+            rate_remaining.as_deref(),
+            rate_reset.as_deref(),
+            &body,
+            now_secs(),
+        ));
     }
 
     let mut body = Vec::new();
@@ -1864,6 +1892,54 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
         .context("reading response body")?;
 
     serde_json::from_slice(&body).context("parsing JSON")
+}
+
+fn github_http_error(
+    status: u16,
+    rate_remaining: Option<&str>,
+    rate_reset: Option<&str>,
+    body: &[u8],
+    now: u64,
+) -> String {
+    let message = serde_json::from_slice::<GitHubError>(body)
+        .ok()
+        .map(|error| sanitize_github_message(&error.message));
+    // 403 is what the REST API has always answered a spent quota with; 429 is
+    // what it increasingly answers instead, and both carry the same headers.
+    let rate_limited = matches!(status, 403 | 429)
+        && (rate_remaining == Some("0")
+            || message.as_deref().is_some_and(|message| {
+                message.to_ascii_lowercase().contains("rate limit exceeded")
+            }));
+
+    if rate_limited {
+        let retry = rate_reset
+            .and_then(|reset| reset.parse::<u64>().ok())
+            .filter(|reset| *reset > now)
+            .map(|reset| {
+                let minutes = (reset - now).div_ceil(60);
+                let suffix = if minutes == 1 { "" } else { "s" };
+                format!("try again in about {minutes} minute{suffix}")
+            })
+            .unwrap_or_else(|| "try again shortly".to_string());
+        return format!("GitHub API rate limit exceeded; {retry} (HTTP {status})");
+    }
+
+    match message.filter(|message| !message.is_empty()) {
+        Some(message) => format!("GitHub returned HTTP {status}: {message}"),
+        None => format!("GitHub returned HTTP {status}"),
+    }
+}
+
+fn sanitize_github_message(message: &str) -> String {
+    let single_line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = single_line.chars();
+    let shortened: String = chars.by_ref().take(200).collect();
+    if chars.next().is_some() {
+        format!("{shortened}…")
+    } else {
+        shortened
+    }
 }
 
 /// Returns the release together with the version it advertises, which is not
@@ -2894,6 +2970,73 @@ fn is_update_available(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_rate_limit_error_says_when_to_retry() {
+        let error = github_http_error(
+            403,
+            Some("0"),
+            Some("4600"),
+            br#"{"message":"API rate limit exceeded for 203.0.113.1."}"#,
+            1000,
+        );
+
+        assert_eq!(
+            error,
+            "GitHub API rate limit exceeded; try again in about 60 minutes (HTTP 403)"
+        );
+    }
+
+    /// GitHub answers a spent quota with 403 or 429 depending on the endpoint
+    /// and the era. Only the 403 spelling used to reach the retry advice, so a
+    /// 429 told the reader the quota was gone without saying when it returns.
+    #[test]
+    fn a_429_is_a_rate_limit_too() {
+        let error = github_http_error(
+            429,
+            Some("0"),
+            Some("1600"),
+            br#"{"message":"API rate limit exceeded for 203.0.113.1."}"#,
+            1000,
+        );
+
+        assert_eq!(
+            error,
+            "GitHub API rate limit exceeded; try again in about 10 minutes (HTTP 429)"
+        );
+    }
+
+    #[test]
+    fn expired_github_rate_limit_says_to_retry_shortly() {
+        let error = github_http_error(
+            403,
+            Some("0"),
+            Some("999"),
+            br#"{"message":"API rate limit exceeded."}"#,
+            1000,
+        );
+
+        assert_eq!(
+            error,
+            "GitHub API rate limit exceeded; try again shortly (HTTP 403)"
+        );
+    }
+
+    #[test]
+    fn github_json_error_keeps_a_short_actionable_message() {
+        let error = github_http_error(
+            404,
+            None,
+            None,
+            br#"{"message":"Not Found\nPlease check the repository"}"#,
+            1000,
+        );
+
+        assert_eq!(
+            error,
+            "GitHub returned HTTP 404: Not Found Please check the repository"
+        );
+    }
 
     fn github_asset(name: &str) -> GitHubAsset {
         GitHubAsset {

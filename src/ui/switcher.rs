@@ -3725,8 +3725,8 @@ mod tests {
         view.name = None;
         assert_eq!(
             tab_view_label(&view, 0, None),
-            "✳ 修复 workspace switcher",
-            "then the title the local strip would be showing, verbatim"
+            "修复 workspace switcher",
+            "then the title the local strip would be showing — mark and all,              which is to say without the mark"
         );
 
         view.osc_title = Some("user@host:~/repo/025/tty7".to_string());

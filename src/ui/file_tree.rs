@@ -6,12 +6,12 @@ use std::sync::Arc;
 use crate::core::config::RightPanelTab;
 use crate::core::git::status::{DecoStatus, DirRollup, StatusIndex};
 use crate::terminal::git_data::index_of;
-use crate::ui::app::Tty7App;
+use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::file_copy;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{ROW_GLYPH, git_badge};
+use crate::ui::right_panel::{ROW_GLYPH, ROW_INSET, git_badge};
 use crate::ui::scm::status::{status_color, status_glyph};
 use gpui::prelude::*;
 use gpui::{
@@ -24,6 +24,18 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 
+// The tree is laid out the way every other list in this panel is: the column
+// sits a `ROW_INSET` short of `CONTENT_INSET` and each row pads itself back
+// out, so a depth-0 name lands on the panel's 12px rail while the row's hover
+// and selection fill bleeds past it to 8. Depth is added on top of that inset,
+// so `INDENT` is the step between levels and nothing else.
+//
+// It used to run its own pair of numbers instead — a `px_1()` column and a 6px
+// row — which put the tree's names 2px left of the search field directly above
+// them and let a selected row's fill reach twice as close to the panel edge as
+// an Info or Source Control row's. Two adjacent left edges that disagree by
+// 2px is the one misalignment a reader can actually catch, because the search
+// glyph sits right there to compare against.
 const INDENT: f32 = 14.0;
 
 const REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1579,7 +1591,7 @@ impl Tty7App {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.right_panel.tree_scroll)
-            .px_1()
+            .px(px(CONTENT_INSET - ROW_INSET))
             .pb_1()
             .track_focus(&self.file_tree.focus_handle)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -1718,9 +1730,9 @@ impl Tty7App {
             return vec![
                 h_flex()
                     // Aligned with the label column of a real row at this
-                    // depth: 6 for the row's own inset, INDENT for the depth,
-                    // then the width of the icon and its gap.
-                    .pl(px(6.0 + row.depth as f32 * INDENT + 20.0))
+                    // depth: ROW_INSET for the row's own inset, INDENT for the
+                    // depth, then the width of the icon and its gap.
+                    .pl(px(ROW_INSET + row.depth as f32 * INDENT + 20.0))
                     .py_1()
                     .items_center()
                     .text_xs()
@@ -1806,8 +1818,8 @@ impl Tty7App {
             .id(SharedString::from(format!("tree-{}", path.display())))
             .items_center()
             .gap_1()
-            .pl(px(6.0 + row.depth as f32 * INDENT))
-            .pr_1()
+            .pl(px(ROW_INSET + row.depth as f32 * INDENT))
+            .pr(px(ROW_INSET))
             .py_1()
             .rounded(cx.theme().radius)
             .cursor_pointer()
@@ -1903,8 +1915,8 @@ impl Tty7App {
                     h_flex()
                         .items_center()
                         .gap_1()
-                        .pl(px(6.0 + (row.depth + 1) as f32 * INDENT))
-                        .pr_1()
+                        .pl(px(ROW_INSET + (row.depth + 1) as f32 * INDENT))
+                        .pr(px(ROW_INSET))
                         .py_0p5()
                         .child(Input::new(&input).xsmall())
                         .into_any_element(),

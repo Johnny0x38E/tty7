@@ -167,6 +167,16 @@ pub(crate) struct RightPanelState {
     /// and "nobody could tell us" are different sentences and the panel has to
     /// say which one it means.
     pub(crate) procs_unsupported: bool,
+    /// The last round trip measured to the machine `procs_pane` lives on.
+    /// `None` before the first ping comes back.
+    pub(crate) link_rtt: Option<std::time::Duration>,
+    /// Which host `link_rtt` was measured against, and — since only a remote
+    /// pane has one — whether the latency row is drawn at all. Held per host
+    /// rather than per pane so that moving between two panes of the same
+    /// machine keeps the number on screen: it belongs to the link the two
+    /// panes share, and blanking it per pane would empty the row for as long
+    /// as the next poll takes to cross the network.
+    pub(crate) link_host: Option<crate::ui::host_ops::HostId>,
     /// How `procs_pane`'s loopback ports can be reached from this machine.
     /// Read by the Ports list to decide what a click on a port does, and by
     /// the watch to decide whether it has to keep looking with the panel shut.
@@ -249,6 +259,32 @@ enum InfoValue {
         removed: u32,
         open: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     },
+}
+
+/// The table convention for a cell with nothing in it. Needs no translating,
+/// and is shorter to read than any of the sentences it stands in for.
+const EMPTY: &str = "—";
+
+/// A round trip, at the precision the number is worth reading to.
+///
+/// Whole milliseconds up to a second: tenths of a millisecond on a link that
+/// varies by whole ones is noise dressed as measurement. Past a second the
+/// millisecond stops mattering and the second is the unit anyone would say it
+/// in.
+fn format_rtt(rtt: std::time::Duration) -> String {
+    let ms = rtt.as_secs_f64() * 1000.;
+    if ms < 1. {
+        // Loopback and a peer on the same LAN both land here. Rounding to
+        // "0 ms" would read as a failed measurement rather than a fast one.
+        return "<1 ms".to_string();
+    }
+    // Rounded before the comparison, so 999.6 ms is not shown as "1000 ms" —
+    // a millisecond reading that has run past the unit's own range.
+    let rounded = ms.round() as u64;
+    if rounded < 1000 {
+        return format!("{rounded} ms");
+    }
+    format!("{:.1} s", rtt.as_secs_f64())
 }
 
 /// One label/value line of the Session section.
@@ -781,6 +817,23 @@ impl Tty7App {
                 if let Some(ssh) = view.ssh_spec() {
                     rows.push(InfoRow::text(t(L10nKey::PanelSsh), ssh.host.clone()).copyable());
                 }
+                // Only where there is a network between here and the shell. On
+                // a pane of this machine's own the row would be reporting the
+                // round trip to a Unix socket, which is a number with nothing
+                // to compare it against.
+                if self.right_panel.link_host.is_some() {
+                    rows.push(InfoRow::text(
+                        t(L10nKey::PanelLatency),
+                        // A link whose first ping has not come back yet,
+                        // rather than one measured at zero. The dash is the
+                        // table's empty cell, the same one a clean working
+                        // tree gets.
+                        self.right_panel
+                            .link_rtt
+                            .map(format_rtt)
+                            .unwrap_or_else(|| EMPTY.to_string()),
+                    ));
+                }
                 git = view.git_status(cx);
             }
             // Read off the same pane the rows above describe, rather than off
@@ -916,7 +969,7 @@ impl Tty7App {
                         this.child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("—".to_string()),
+                                .child(EMPTY.to_string()),
                         )
                     })
                     .when(added > 0, |this| {
@@ -1589,6 +1642,14 @@ impl Tty7App {
         let Some(pane_id) = pane_id else { return };
         self.right_panel.procs_forwards = forwards.clone();
         self.right_panel.procs_host = host.clone();
+        // Per host, not per pane — see `link_host`. A pane of this machine's
+        // own has no host at all, which is what clears the section rather than
+        // leaving the last remote pane's numbers under a local one.
+        let link_host = host.as_ref().map(|h| h.id());
+        if self.right_panel.link_host != link_host {
+            self.right_panel.link_host = link_host;
+            self.right_panel.link_rtt = None;
+        }
         if self.right_panel.procs_pane != Some(pane_id) {
             self.right_panel.procs_pane = Some(pane_id);
             self.right_panel.procs = None;
@@ -1620,7 +1681,15 @@ impl Tty7App {
     ) {
         cx.spawn(async move |this, cx| {
             let route = forwards.clone();
-            let (procs, managed) = cx
+            // Only while someone is looking. This poll also runs with the panel
+            // shut, watching for ports to forward, and a round trip per round
+            // for a row nobody can see is the far end's time spent on nothing.
+            let want_link = this
+                .read_with(cx, |app, _| {
+                    app.right_panel_visible && app.right_panel_tab == RightPanelTab::Info
+                })
+                .unwrap_or(false);
+            let (procs, managed, link) = cx
                 .background_executor()
                 .spawn(async move {
                     // A remote workspace's pane runs on the peer, so the peer
@@ -1637,7 +1706,11 @@ impl Tty7App {
                         None => Some(crate::terminal::RemoteTerminal::query_procs(pane_id)),
                     };
                     let managed = route.map(|r| r.list()).unwrap_or_default();
-                    (procs, managed)
+                    let link = match (want_link, &host) {
+                        (true, Some(host)) => host.link_rtt(),
+                        _ => None,
+                    };
+                    (procs, managed, link)
                 })
                 .await;
             let keep_polling = this
@@ -1654,6 +1727,13 @@ impl Tty7App {
                     }
                     if forwards.is_some() {
                         app.loopback_panel.managed = managed;
+                    }
+                    // Only when this round actually asked. A round that did not
+                    // leaves the last answer in place, so reopening the panel
+                    // shows the number it was closed on rather than a dash
+                    // until the next poll lands.
+                    if want_link {
+                        app.right_panel.link_rtt = link;
                     }
                     cx.notify();
                     let wanted = app.procs_wanted();
@@ -1813,7 +1893,7 @@ fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{InfoRow, InfoValue, forwards_port};
+    use super::{InfoRow, InfoValue, format_rtt, forwards_port};
     use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
 
     fn forward(kind: SshForwardKind, target_host: &str, target_port: u16) -> ManagedForward {
@@ -1917,6 +1997,25 @@ mod tests {
             !diff(3, 1, false).interactive(),
             "no target means no link, however dirty the tree"
         );
+    }
+
+    #[test]
+    fn a_round_trip_is_read_at_the_precision_it_is_worth() {
+        use std::time::Duration;
+        // A peer on the same machine or the same LAN. "0 ms" would read as a
+        // measurement that failed rather than one that was fast.
+        assert_eq!(format_rtt(Duration::from_micros(120)), "<1 ms");
+        assert_eq!(format_rtt(Duration::from_micros(999)), "<1 ms");
+        assert_eq!(format_rtt(Duration::from_millis(1)), "1 ms");
+        assert_eq!(format_rtt(Duration::from_micros(23_400)), "23 ms");
+        assert_eq!(format_rtt(Duration::from_millis(999)), "999 ms");
+        // Rounding up out of the millisecond's own range hands the number to
+        // the unit above rather than printing a four-digit millisecond.
+        assert_eq!(format_rtt(Duration::from_micros(999_600)), "1.0 s");
+        // Past a second the millisecond has stopped carrying information, and
+        // the second is the unit anyone would say the number in.
+        assert_eq!(format_rtt(Duration::from_millis(1_450)), "1.4 s");
+        assert_eq!(format_rtt(Duration::from_secs(4)), "4.0 s");
     }
 
     #[test]

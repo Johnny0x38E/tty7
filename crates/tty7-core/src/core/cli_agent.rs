@@ -26,10 +26,11 @@ pub enum CLIAgent {
     // Keep new variants at the end: daemon messages serialize this enum and
     // moving an existing discriminant would break mixed-version clients.
     TraeCode,
+    QoderCLI,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 20] = [
+    pub const ALL: [CLIAgent; 21] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -50,6 +51,7 @@ impl CLIAgent {
         CLIAgent::Qwen,
         CLIAgent::OhMyPi,
         CLIAgent::Kimi,
+        CLIAgent::QoderCLI,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -83,6 +85,15 @@ impl CLIAgent {
             // kimi-cli install a `kimi` — same vendor, same brand, so one
             // detection covers them. Only the standalone one has hooks.
             CLIAgent::Kimi => &["kimi", "kimi-code"],
+            // The npm package installs two binaries and `qoder` is the one the
+            // documentation tells people to run: it dispatches to the CLI for a
+            // bare invocation, a flag, or a prompt, and only hands off to the
+            // IDE for `ide`/`chat`/`serve-web`/`tunnel` or a path that exists.
+            // Detecting only `qodercli` would miss every session started the
+            // documented way, since the dispatcher is what the pty sees. An IDE
+            // launch is the cost: it wears the CLI's avatar for as long as the
+            // launcher takes to exit.
+            CLIAgent::QoderCLI => &["qoder", "qodercli"],
         }
     }
 
@@ -108,6 +119,7 @@ impl CLIAgent {
             CLIAgent::Qwen => "qwen",
             CLIAgent::OhMyPi => "omp",
             CLIAgent::Kimi => "kimi",
+            CLIAgent::QoderCLI => "qodercli",
         }
     }
 
@@ -138,6 +150,7 @@ impl CLIAgent {
             CLIAgent::Qwen => "Qwen Code",
             CLIAgent::OhMyPi => "Oh My Pi",
             CLIAgent::Kimi => "Kimi Code",
+            CLIAgent::QoderCLI => "Qoder CLI",
         }
     }
 
@@ -169,6 +182,7 @@ impl CLIAgent {
             CLIAgent::Droid => Some(format!("droid{flags} --resume {session_id}")),
             CLIAgent::Copilot => Some(format!("copilot{flags} --resume {session_id}")),
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id}")),
+            CLIAgent::QoderCLI => Some(format!("qodercli{flags} --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --resume {session_id}")),
             CLIAgent::Kimi => Some(format!("kimi{flags} --session {session_id}")),
@@ -185,6 +199,9 @@ impl CLIAgent {
             // "If false, chat history is not saved and --continue/--resume
             // will not work" — the yargs negation of `--chat-recording`.
             CLIAgent::Qwen => &["--no-chat-recording"],
+            // Print mode still emits a session id in hooks when persistence
+            // is disabled, but there is no saved conversation to reopen.
+            CLIAgent::QoderCLI => &["--no-session-persistence"],
             _ => &[],
         };
         argv.iter().any(|t| ephemeral.contains(&t.as_str()))
@@ -202,6 +219,9 @@ impl CLIAgent {
                 "claude{flags} --resume {session_id} --fork-session"
             )),
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id} --fork-session")),
+            CLIAgent::QoderCLI => Some(format!(
+                "qodercli{flags} --resume {session_id} --fork-session"
+            )),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --fork {session_id}")),
             // Droid forks with a standalone flag rather than resume-plus-a-switch.
@@ -229,7 +249,8 @@ impl CLIAgent {
             | CLIAgent::Droid
             | CLIAgent::Amp
             | CLIAgent::Qwen
-            | CLIAgent::Goose => Some("Fork Session"),
+            | CLIAgent::Goose
+            | CLIAgent::QoderCLI => Some("Fork Session"),
             _ => None,
         }
     }
@@ -393,6 +414,21 @@ impl CLIAgent {
                 "--worktree-ref",
                 "--ref",
             ],
+            // `--resume`/`-r` restores a past session and `--continue`/`-c` the
+            // most recent one; `--session-id` is a third spelling of the same
+            // thing. All three clash with the `--resume {id}` this command
+            // appends, and `--fork-session` is the flag the fork variant
+            // appends itself. `--worktree` would create or switch trees again;
+            // Qoder's `-w` means `--cwd` and must survive.
+            CLIAgent::QoderCLI => &[
+                "--resume",
+                "-r",
+                "--continue",
+                "-c",
+                "--session-id",
+                "--fork-session",
+                "--worktree",
+            ],
             _ => &[],
         };
         let mut i = 0;
@@ -457,6 +493,7 @@ impl CLIAgent {
             // The blue of the flame in Kimi's brand mark; the glyph itself is
             // black, which Codex and Grok already have covered.
             CLIAgent::Kimi => 0x027AFF,
+            CLIAgent::QoderCLI => 0xFFFFFF,
         }
     }
 
@@ -475,6 +512,7 @@ impl CLIAgent {
     pub fn icon_rgb(self) -> u32 {
         match self {
             CLIAgent::TraeCode => 0x32F08C,
+            CLIAgent::QoderCLI => 0x000000,
             _ => 0xFFFFFF,
         }
     }
@@ -496,6 +534,7 @@ impl CLIAgent {
             CLIAgent::OhMyPi => "icons/agents/omp.svg",
             CLIAgent::Qwen => "icons/agents/qwen.svg",
             CLIAgent::Kimi => "icons/agents/kimi.svg",
+            CLIAgent::QoderCLI => "icons/agents/qodercli.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
@@ -846,6 +885,32 @@ mod tests {
             ])),
             Some(CLIAgent::Claude)
         );
+    }
+
+    /// The npm package installs `qoder` and `qodercli`, and the documentation
+    /// tells people to run the first one. Both are `#!/usr/bin/env node`
+    /// scripts, so what the pty carries is node plus the path to the shim —
+    /// the dispatcher's own child, which is where the name `qodercli` appears
+    /// on that path, is not the process group leader and is never read.
+    #[test]
+    fn qoder_is_detected_through_either_of_its_binaries() {
+        for launcher in [
+            "qoder",
+            "qodercli",
+            "/opt/homebrew/bin/qoder",
+            "/opt/homebrew/bin/qodercli",
+        ] {
+            assert_eq!(
+                CLIAgent::detect_from_argv(&argv(&["node", launcher])),
+                Some(CLIAgent::QoderCLI),
+                "on {launcher}"
+            );
+            assert_eq!(
+                CLIAgent::detect_from_argv(&argv(&[launcher])),
+                Some(CLIAgent::QoderCLI),
+                "on {launcher}"
+            );
+        }
     }
 
     #[test]
@@ -1507,6 +1572,88 @@ mod tests {
                 )
                 .as_deref(),
             Some("grok --yolo --resume g-3")
+        );
+        assert_eq!(
+            CLIAgent::QoderCLI
+                .resume_command("q-1", Some(&argv(&["qodercli", "--model", "qoder-1"])))
+                .as_deref(),
+            Some("qodercli --model qoder-1 --resume q-1")
+        );
+        assert_eq!(
+            CLIAgent::QoderCLI
+                .resume_command(
+                    "q-2",
+                    Some(&argv(&["qodercli", "--resume", "q-1", "--fork-session"]))
+                )
+                .as_deref(),
+            Some("qodercli --resume q-2"),
+            "a stale --resume id and --fork-session come off before the new one goes on"
+        );
+        assert_eq!(
+            CLIAgent::QoderCLI
+                .resume_command(
+                    "q-3",
+                    Some(&argv(&["qodercli", "--session-id", "old", "--yolo"]))
+                )
+                .as_deref(),
+            Some("qodercli --yolo --resume q-3"),
+            "`--session-id` names a new session and is rejected next to `--resume`"
+        );
+    }
+
+    #[test]
+    fn qoder_resume_and_fork_do_not_recreate_worktrees() {
+        for worktree in [
+            vec!["--worktree"],
+            vec!["--worktree", "old-tree"],
+            vec!["--worktree=old-tree"],
+        ] {
+            for cwd_flag in ["-w", "--cwd"] {
+                let mut launch = argv(&["qodercli", "--model", "qoder-1"]);
+                launch.extend(argv(&worktree));
+                launch.extend(argv(&[cwd_flag, "/repo/current-tree"]));
+                assert_eq!(
+                    CLIAgent::QoderCLI.resume_command("q-1", Some(&launch)),
+                    Some(format!(
+                        "qodercli --model qoder-1 {cwd_flag} /repo/current-tree --resume q-1"
+                    )),
+                    "launch argv: {launch:?}"
+                );
+                assert_eq!(
+                    CLIAgent::QoderCLI.fork_command("q-1", Some(&launch)),
+                    Some(format!(
+                        "qodercli --model qoder-1 {cwd_flag} /repo/current-tree --resume q-1 --fork-session"
+                    )),
+                    "launch argv: {launch:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qoder_session_commands_require_persistence() {
+        let ephemeral = argv(&["qodercli", "--print", "--no-session-persistence"]);
+        assert_eq!(
+            CLIAgent::QoderCLI.resume_command("q-1", Some(&ephemeral)),
+            None
+        );
+        assert_eq!(
+            CLIAgent::QoderCLI.fork_command("q-1", Some(&ephemeral)),
+            None
+        );
+
+        let persistent = argv(&["qodercli", "--model", "qoder-1"]);
+        assert_eq!(
+            CLIAgent::QoderCLI
+                .resume_command("q-1", Some(&persistent))
+                .as_deref(),
+            Some("qodercli --model qoder-1 --resume q-1")
+        );
+        assert_eq!(
+            CLIAgent::QoderCLI
+                .fork_command("q-1", Some(&persistent))
+                .as_deref(),
+            Some("qodercli --model qoder-1 --resume q-1 --fork-session")
         );
     }
 

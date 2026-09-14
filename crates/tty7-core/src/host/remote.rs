@@ -253,6 +253,22 @@ impl Host for RemoteHost {
         })
     }
 
+    fn link_rtt(&self) -> Option<std::time::Duration> {
+        // A ping of our own rather than whatever the keepalive last left
+        // behind: that one only fires on an idle link, and a link being polled
+        // for this is by definition not idle, so its number would age out of
+        // date exactly while someone is watching it.
+        if self.client.is_connected()
+            && let Err(e) = self.client.ping()
+        {
+            // The last good measurement below still stands. A link that has
+            // just gone down reports the distance it had while it was up,
+            // which is better than a blank until something notices it is gone.
+            log::debug!("could not ping {:?}: {e}", self.id);
+        }
+        self.client.last_rtt()
+    }
+
     /// The peer owns these panes' PTYs, so it is the one that can walk their
     /// process trees. A peer that does not announce the feature is not asked:
     /// it would answer `Err` and the caller cannot tell that apart from a pane
@@ -1049,6 +1065,75 @@ mod tests {
             &ControlHello::host_rpc("tok", "laptop"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn link_rtt_pings_and_reports_what_came_back() {
+        let (host, seen) = host_with_peer('/', |req| match req {
+            ControlRequest::Ping => Some((ControlReply::Ok(ReplyOk::Pong), vec![])),
+            other => panic!("unexpected request {other:?}"),
+        });
+
+        assert!(
+            host.link_rtt().is_some(),
+            "a ping that came back is a measurement"
+        );
+        assert_eq!(seen.recv().unwrap(), ControlRequest::Ping);
+        assert_eq!(
+            seen.try_recv().ok(),
+            None,
+            "one row is worth one round trip and no more"
+        );
+    }
+
+    /// The latency row must mean the distance to the peer, not how long the
+    /// peer spent on whatever was asked of it. Timing every call would put a
+    /// `ReadFile` of a large file, or a `Git` that shells out, on that row and
+    /// read as a network gone seconds slow.
+    #[test]
+    fn only_a_ping_is_timed() {
+        let (host, _seen) = host_with_peer('/', |req| match req {
+            ControlRequest::Ping => Some((ControlReply::Ok(ReplyOk::Pong), vec![])),
+            ControlRequest::Exists { .. } => Some((ControlReply::Ok(ReplyOk::Bool(true)), vec![])),
+            other => panic!("unexpected request {other:?}"),
+        });
+
+        assert_eq!(
+            host.client().last_rtt(),
+            None,
+            "a link nothing has pinged has no measurement to report"
+        );
+        assert!(host.exists(Path::new("/etc/hosts")));
+        assert_eq!(
+            host.client().last_rtt(),
+            None,
+            "an ordinary call measures the peer's work, so it leaves the link's latency alone"
+        );
+        host.client().ping().unwrap();
+        assert!(host.client().last_rtt().is_some());
+    }
+
+    /// A link that has just gone down keeps the distance it had while it was
+    /// up. Blanking the row on the first failed ping would take the number
+    /// away at exactly the moment someone is looking at it to work out why the
+    /// pane has stopped responding.
+    #[test]
+    fn a_link_that_goes_down_keeps_its_last_measurement() {
+        let served = std::sync::atomic::AtomicBool::new(true);
+        let (host, _seen) = host_with_peer('/', move |req| match req {
+            ControlRequest::Ping => match served.swap(false, Ordering::Relaxed) {
+                true => Some((ControlReply::Ok(ReplyOk::Pong), vec![])),
+                // Hanging up rather than answering, which is what a peer whose
+                // machine went away looks like from here.
+                false => None,
+            },
+            other => panic!("unexpected request {other:?}"),
+        });
+
+        let measured = host.link_rtt().expect("the first ping came back");
+        assert_eq!(host.link_rtt(), Some(measured));
+        assert!(!host.is_connected(), "the second ping took the link down");
+        assert_eq!(host.link_rtt(), Some(measured));
     }
 
     #[test]

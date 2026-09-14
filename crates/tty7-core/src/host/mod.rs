@@ -173,6 +173,15 @@ pub trait WatchHandle: Send + Sync {
 pub trait Host: Send + Sync + 'static {
     fn id(&self) -> HostId;
 
+    /// How far away this host is: the round trip to it, measured now.
+    ///
+    /// `None` from a host with no link to measure — the local one, whose
+    /// "peer" is this process's own daemon over a Unix socket — and from a
+    /// remote one whose link is down or has not answered a ping yet.
+    fn link_rtt(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     fn separator(&self) -> char;
 
     fn join(&self, dir: &Path, name: &str) -> PathBuf {
