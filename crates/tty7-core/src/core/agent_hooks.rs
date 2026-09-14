@@ -1440,8 +1440,11 @@ export default function (pi: ExtensionAPI) {{
   // Extension load = the agent is running in this pane. No context here yet,
   // so the id rides on session_start instead.
   emit("session-start");
-  pi.on("agent_start", (_event, ctx) => emit("prompt-submit", ctx));
-  pi.on("agent_end", (_event, ctx) => emit("stop", ctx));
+  // What the pane showed before a UI prompt put it on "waiting", so closing
+  // the prompt can put it back.
+  let turn = "session-start";
+  pi.on("agent_start", (_event, ctx) => emit((turn = "prompt-submit"), ctx));
+  pi.on("agent_end", (_event, ctx) => emit((turn = "stop"), ctx));
   pi.on("session_shutdown", (_event, ctx) => emit("session-end", ctx));
   // Last, and guarded: the three above already worked, so a Pi build that
   // rejects this event name must not take them — or the whole extension —
@@ -1459,10 +1462,12 @@ export default function (pi: ExtensionAPI) {{
       emit(event.kind === "confirm" ? "permission-request" : "question-asked", ctx);
     }});
   }} catch {{}}
-  // The dialog closed, so the agent is working again. Without this the pane
-  // would stay on "waiting" until the next stop.
+  // The dialog closed: restore what it interrupted. Not a blanket
+  // prompt-submit — Pi also prompts while idle (/model, a command's select),
+  // and that would leave a finished pane reading "working" with no turn to
+  // ever end it.
   try {{
-    pi.on("ui_prompt_end", (_event, ctx) => emit("prompt-submit", ctx));
+    pi.on("ui_prompt_end", (_event, ctx) => emit(turn, ctx));
   }} catch {{}}
 }}
 "#
@@ -2228,6 +2233,10 @@ mod tests {
                     "{slug} bridge subscribes to {event}"
                 );
             }
+            assert!(
+                bridge.contains(r#"pi.on("ui_prompt_end", (_event, ctx) => emit(turn, ctx))"#),
+                "{slug} restores the pre-prompt status rather than forcing working"
+            );
         }
         assert!(
             pi_extension_ts(&target, HookAgent::Claude).is_none(),
