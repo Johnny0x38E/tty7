@@ -2294,7 +2294,8 @@ impl TerminalView {
         let kitty = self.key_flags();
         if let Some(bytes) = super::input::keystroke_to_bytes(ks, kitty) {
             let plain = !m.control && !m.alt && !m.platform;
-            let interrupt = is_typeahead_interrupt(ks.key.as_str(), m);
+            let boundary = typeahead_boundary(ks.key.as_str(), m);
+            let interrupt = boundary.is_some();
             let shell_owns_prompt = self.shell_owns_prompt();
             let held = plain
                 && ks.key == "backspace"
@@ -2311,11 +2312,11 @@ impl TerminalView {
                 };
             if !held {
                 self.release_hold();
-                if !shell_owns_prompt && interrupt {
-                    // Ctrl-C cancels the foreground input transaction. Clear
-                    // the gap before delivering it so a prompt transition
-                    // cannot flush this interrupt as a later Ctrl-U.
-                    self.observe_typeahead(RawInput::Interrupt);
+                if let Some(boundary) = boundary.filter(|_| !shell_owns_prompt) {
+                    // Ctrl-C interrupts and Ctrl-D can close the foreground reader.
+                    // Discard the gap before sending either so a prompt transition
+                    // cannot turn the pending record into a later Ctrl-U.
+                    self.observe_typeahead(boundary);
                 }
                 self.terminal.write(bytes);
                 if !shell_owns_prompt && !interrupt {
@@ -6765,8 +6766,15 @@ impl TerminalView {
     }
 }
 
-fn is_typeahead_interrupt(key: &str, modifiers: &Modifiers) -> bool {
-    modifiers.control && !modifiers.alt && !modifiers.platform && key == "c"
+fn typeahead_boundary(key: &str, modifiers: &Modifiers) -> Option<RawInput<'static>> {
+    if !modifiers.control || modifiers.alt || modifiers.platform {
+        return None;
+    }
+    match key {
+        "c" => Some(RawInput::Interrupt),
+        "d" => Some(RawInput::EndOfInput),
+        _ => None,
+    }
 }
 
 fn sync_typeahead_owner_state(
@@ -7908,8 +7916,8 @@ mod tests {
     use super::{
         COMPLETION_MENU_MAX_W, LoopbackPlan, PortRoute, RawInput, SelectEndCopy, Typeahead,
         WheelRoute, clipboard_paste_text, compose_notification_title, cwd_is_on_host,
-        display_width, is_typeahead_interrupt, link_path_style, loopback_plan,
-        observe_typeahead_for_owner,
+        display_width, link_path_style, loopback_plan, observe_typeahead_for_owner,
+        typeahead_boundary,
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
@@ -8082,20 +8090,28 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_ctrl_c_is_a_typeahead_interrupt() {
+    fn ctrl_c_and_ctrl_d_discard_foreground_typeahead() {
         let ctrl = Modifiers {
             control: true,
             ..Default::default()
         };
-        assert!(is_typeahead_interrupt("c", &ctrl));
-        assert!(!is_typeahead_interrupt("d", &ctrl));
+        assert!(matches!(
+            typeahead_boundary("c", &ctrl),
+            Some(RawInput::Interrupt)
+        ));
+        assert!(matches!(
+            typeahead_boundary("d", &ctrl),
+            Some(RawInput::EndOfInput)
+        ));
+        assert!(typeahead_boundary("u", &ctrl).is_none());
 
         let ctrl_alt = Modifiers {
             control: true,
             alt: true,
             ..Default::default()
         };
-        assert!(!is_typeahead_interrupt("c", &ctrl_alt));
+        assert!(typeahead_boundary("c", &ctrl_alt).is_none());
+        assert!(typeahead_boundary("d", &ctrl_alt).is_none());
     }
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
@@ -11076,11 +11092,26 @@ mod gpui_tests {
 
     #[gpui::test]
     fn passthrough_ctrl_c_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
+        assert_foreground_interrupt_does_not_wipe_prompt(cx, "agent input", "ctrl-c", 0x03);
+    }
+
+    #[gpui::test]
+    fn passthrough_ctrl_d_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
+        // Ctrl-D only ends input on an empty line; with text it is an edit.
+        assert_foreground_interrupt_does_not_wipe_prompt(cx, "", "ctrl-d", 0x04);
+    }
+
+    fn assert_foreground_interrupt_does_not_wipe_prompt(
+        cx: &mut TestAppContext,
+        pending: &str,
+        chord: &str,
+        byte: u8,
+    ) {
         let (window, mut daemon) = harness(cx);
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active(), "the foreground process owns input");
-                view.typeahead.observe(RawInput::Text("agent input"), false);
+                view.typeahead.observe(RawInput::Text(pending), false);
                 view.typeahead.observe(
                     RawInput::Key {
                         key: "up",
@@ -11091,23 +11122,70 @@ mod gpui_tests {
 
                 view.on_key_down(
                     &KeyDownEvent {
-                        keystroke: key("ctrl-c"),
+                        keystroke: key(chord),
                         is_held: false,
                         prefer_character_input: false,
                     },
                     window,
                     cx,
                 );
-                assert_eq!(view.typeahead.drain(), None);
+                // Exercise the consumers without draining their input first.
+                view.adopt_typeahead();
                 view.flush_typeahead();
+                assert!(view.cmd.text().is_empty());
             })
             .unwrap();
 
-        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x03]));
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![byte]));
         assert_eq!(
             next_input_until_timeout(&mut daemon),
             None,
-            "resuming the shell must not synthesize Ctrl-U after Ctrl-C"
+            "resuming the shell must not synthesize Ctrl-U after {chord}"
+        );
+    }
+
+    #[gpui::test]
+    fn submitted_exit_typeahead_does_not_wipe_the_returned_prompt(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                // Ordinary SSH need not take the alternate screen or identify
+                // as an agent. Its input reaches the passthrough recorder.
+                assert!(!view.input_active());
+                for ch in ["e", "x", "i", "t"] {
+                    type_char(view, ch, window, cx);
+                }
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("enter"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        for bytes in [b"e", b"x", b"i", b"t", b"\r"] {
+            assert_eq!(next_input_until_timeout(&mut daemon), Some(bytes.to_vec()));
+        }
+
+        prompt_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.input_active());
+                view.adopt_typeahead();
+                view.flush_typeahead();
+                assert!(
+                    view.cmd.text().is_empty(),
+                    "exit belongs to the finished session"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "returning from exit must not inject Ctrl-U into the local prompt"
         );
     }
 
