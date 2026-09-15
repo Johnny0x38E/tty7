@@ -16,7 +16,7 @@ use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursor
 
 use std::collections::VecDeque;
 
-use crate::core::cli_agent::{AgentSessionState, CLIAgent};
+use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 use crate::core::config::CursorStyle as ConfigCursorStyle;
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
@@ -64,12 +64,35 @@ struct ShellState {
     cycle: u64,
 }
 
+/// The pane's agent status as the client last heard it, plus how it heard it.
+///
+/// A reattach — the app restarting onto panes the daemon kept alive, or a
+/// dropped link coming back — has the daemon replay the pane's *stored* status
+/// as an ordinary `AgentStatus` frame ([`crate::daemon`]'s `replay_state`).
+/// Nothing on the wire distinguishes it from a live transition, and a client
+/// that reads it as one concludes that every restored agent finished its turn
+/// in the instant the window opened. `replayed` is that distinction, kept in
+/// the same lock as the value it describes so a reader can never observe the
+/// status without also learning where it came from.
+#[derive(Default)]
+struct AgentSlot {
+    state: Option<AgentSessionState>,
+    /// `state` arrived as an attach replay and no one has adopted it yet.
+    /// Cleared by the first taker — the view adopts it as a baseline rather
+    /// than as an edge.
+    replayed: bool,
+}
+
 struct ReaderSignals {
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell: Arc<Mutex<ShellState>>,
     remote: Arc<Mutex<Option<RemoteContext>>>,
     agent: Arc<Mutex<Option<CLIAgent>>>,
-    agent_session: Arc<Mutex<Option<AgentSessionState>>>,
+    agent_session: Arc<Mutex<AgentSlot>>,
+    /// Whether this link still owes us the attach replay. The reader keeps it
+    /// as a plain local: a link's replay is a property of that link's stream
+    /// position, and nothing outside the reader thread ever needs to read it.
+    awaiting_replay: bool,
     exited: Arc<AtomicBool>,
     child_exited: Arc<AtomicBool>,
     zle_reading: Arc<AtomicBool>,
@@ -571,7 +594,7 @@ pub struct RemoteTerminal {
     ssh_user: Option<String>,
     auto_supplied_password: bool,
     agent: Arc<Mutex<Option<CLIAgent>>>,
-    agent_session: Arc<Mutex<Option<AgentSessionState>>>,
+    agent_session: Arc<Mutex<AgentSlot>>,
     /// Kitty-graphics images placed on this pane's grid (issue #213).
     /// Written by the reader thread from out-of-band `Image`/`DeleteImage`
     /// frames, read by the paint path — only the client holds the grid the
@@ -819,7 +842,8 @@ impl RemoteTerminal {
             }
             Err(e) => return Err(e),
         };
-        let mut term = Self::from_stream_with(stream, size, buffered, PtySource::for_route(route))?;
+        let mut term =
+            Self::from_stream_parts(stream, size, buffered, PtySource::for_route(route), true)?;
         term.route = route.clone();
         Ok(term)
     }
@@ -866,6 +890,17 @@ impl RemoteTerminal {
 
         let read_half = stream.try_clone()?;
 
+        // A relink keeps the view, and the view keeps the status it last saw
+        // before the link dropped. That is already a baseline, and the better
+        // one: if the agent finished its turn while the link was down, the
+        // daemon's replayed `Done` against the view's `Working` is exactly the
+        // edge the reader must be told about. So the relink's replay is read
+        // as a live report, and a cold-attach mark nobody took yet is dropped
+        // rather than left to swallow that edge.
+        if let Ok(mut guard) = self.agent_session.lock() {
+            guard.replayed = false;
+        }
+
         self.exited_flag.store(false, Ordering::SeqCst);
         self.exited = false;
         {
@@ -891,6 +926,10 @@ impl RemoteTerminal {
                 remote: self.remote_context.clone(),
                 agent: self.agent.clone(),
                 agent_session: self.agent_session.clone(),
+                // The daemon does replay the stored status down this link, but
+                // the view already has a baseline from before the drop — see
+                // above.
+                awaiting_replay: false,
                 exited: self.exited_flag.clone(),
                 child_exited: self.child_exited.clone(),
                 zle_reading: self.zle_reading.clone(),
@@ -920,6 +959,20 @@ impl RemoteTerminal {
         Ok(())
     }
 
+    /// A pane the client *reattached* to rather than spawned — the shape the
+    /// app restores last session's tabs in, where the head of the stream is the
+    /// daemon replaying state the pane already had.
+    #[cfg(test)]
+    pub(super) fn from_stream_reattached(stream: Stream, size: TermSize) -> anyhow::Result<Self> {
+        Self::from_stream_parts(
+            stream,
+            size,
+            Vec::new(),
+            PtySource::for_route(&PaneRoute::Local),
+            true,
+        )
+    }
+
     /// A pane on a pty of this machine's own — what the tests build, and what
     /// `spawn_on` narrows with the route it dialled.
     pub(super) fn from_stream(stream: Stream, size: TermSize) -> anyhow::Result<Self> {
@@ -936,6 +989,22 @@ impl RemoteTerminal {
         size: TermSize,
         buffered: Vec<u8>,
         pty: PtySource,
+    ) -> anyhow::Result<Self> {
+        Self::from_stream_parts(stream, size, buffered, pty, false)
+    }
+
+    /// `awaiting_replay` says this link is an attach rather than a spawn, and
+    /// so that the frames at the head of its stream describe a pane that was
+    /// already running — see [`AgentSlot`]. It has to be decided here rather
+    /// than set on the returned terminal: the reader starts inside this
+    /// function, and against a daemon that answers promptly the replay can be
+    /// parsed before the caller gets its value back.
+    fn from_stream_parts(
+        stream: Stream,
+        size: TermSize,
+        buffered: Vec<u8>,
+        pty: PtySource,
+        awaiting_replay: bool,
     ) -> anyhow::Result<Self> {
         let read_half = stream.try_clone()?;
         let write_half = stream;
@@ -955,7 +1024,7 @@ impl RemoteTerminal {
         let shell_state: Arc<Mutex<ShellState>> = Arc::new(Mutex::new(ShellState::default()));
         let remote_context: Arc<Mutex<Option<RemoteContext>>> = Arc::new(Mutex::new(None));
         let agent: Arc<Mutex<Option<CLIAgent>>> = Arc::new(Mutex::new(None));
-        let agent_session: Arc<Mutex<Option<AgentSessionState>>> = Arc::new(Mutex::new(None));
+        let agent_session: Arc<Mutex<AgentSlot>> = Arc::new(Mutex::new(AgentSlot::default()));
         let exited_flag = Arc::new(AtomicBool::new(false));
         let child_exited = Arc::new(AtomicBool::new(false));
         let zle_reading = Arc::new(AtomicBool::new(false));
@@ -982,6 +1051,7 @@ impl RemoteTerminal {
                 remote: remote_context.clone(),
                 agent: agent.clone(),
                 agent_session: agent_session.clone(),
+                awaiting_replay,
                 exited: exited_flag.clone(),
                 child_exited: child_exited.clone(),
                 zle_reading: zle_reading.clone(),
@@ -1092,6 +1162,7 @@ impl RemoteTerminal {
                     remote,
                     agent,
                     agent_session,
+                    awaiting_replay,
                     exited: exited_flag,
                     child_exited,
                     zle_reading,
@@ -1104,6 +1175,7 @@ impl RemoteTerminal {
                     clipboard_write_busy,
                     repair_cursor,
                 } = signals;
+                let mut awaiting_replay = awaiting_replay;
                 crate::core::threads::promote_to_user_interactive();
                 let mut stream = read_half;
                 let mut processor: ansi::Processor = ansi::Processor::new();
@@ -1327,6 +1399,16 @@ impl RemoteTerminal {
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
                             DaemonMsg::Output(bytes) => {
+                                // Live output only ever follows the whole
+                                // replay (the daemon sends the stored status
+                                // last, and the stream keeps that order), so
+                                // the first frame here ends the window in which
+                                // a status can still be a replayed one. Without
+                                // this, a pane that had no agent session to
+                                // replay would keep the window open until some
+                                // agent it ran *later* reported for the first
+                                // time, and that report would be discounted.
+                                awaiting_replay = false;
                                 out_batch.extend_from_slice(&bytes);
                                 tr_frames += 1;
                             }
@@ -1508,7 +1590,11 @@ impl RemoteTerminal {
                             DaemonMsg::AgentStatus(state) => {
                                 flush_batch!();
                                 if let Ok(mut guard) = agent_session.lock() {
-                                    *guard = state;
+                                    guard.state = state;
+                                    // The first such frame on an attached link
+                                    // is the pane's stored status being
+                                    // replayed, not a turn changing state now.
+                                    guard.replayed = std::mem::take(&mut awaiting_replay);
                                 }
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
@@ -1729,7 +1815,22 @@ impl RemoteTerminal {
     }
 
     pub fn agent_session(&self) -> Option<AgentSessionState> {
-        self.agent_session.lock().ok().and_then(|g| g.clone())
+        self.agent_session.lock().ok().and_then(|g| g.state.clone())
+    }
+
+    /// The status the daemon replayed when this link attached, handed out once.
+    ///
+    /// `Some(status)` means what [`Self::agent_session`] reports right now is
+    /// stored state from before this client existed — the caller should take it
+    /// as its starting point, not as something that just happened. Answering
+    /// only once is what keeps the very next live transition an edge again.
+    pub fn take_replayed_agent_status(&self) -> Option<Option<AgentStatus>> {
+        let mut guard = self.agent_session.lock().ok()?;
+        if !guard.replayed {
+            return None;
+        }
+        guard.replayed = false;
+        Some(guard.state.as_ref().map(|s| s.status))
     }
 
     pub fn zle_reading(&self) -> bool {
@@ -5602,6 +5703,118 @@ mod tests {
         DaemonMsg::Agent(None).encode(&mut daemon_side).unwrap();
         daemon_side.flush().unwrap();
         assert!(poll(None), "agent exit should clear it");
+    }
+
+    /// The daemon replays a reattached pane's stored agent status as an
+    /// ordinary report. Nothing on the wire says so, so the link has to
+    /// remember that the first report it hears is that replay — and that
+    /// everything after it is live.
+    #[test]
+    fn a_reattached_link_marks_only_its_first_status_report_as_replayed() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term =
+            RemoteTerminal::from_stream_reattached(client_side, TermSize::new(80, 24)).unwrap();
+        assert_eq!(
+            term.take_replayed_agent_status(),
+            None,
+            "nothing replayed until the frame actually arrives"
+        );
+
+        let report = |status, daemon: &mut UnixStream| {
+            DaemonMsg::AgentStatus(Some(AgentSessionState {
+                status,
+                message: None,
+                session_id: Some("sid-1".into()),
+                launch_argv: None,
+                rich: true,
+                cwd: None,
+                activity: 0,
+                turns: 0,
+            }))
+            .encode(daemon)
+            .unwrap();
+            daemon.flush().unwrap();
+        };
+        let poll = |want: AgentStatus| {
+            for _ in 0..200 {
+                if term.agent_session().map(|s| s.status) == Some(want) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        };
+
+        report(AgentStatus::Done, &mut daemon_side);
+        assert!(poll(AgentStatus::Done), "the replayed status should land");
+        assert_eq!(
+            term.take_replayed_agent_status(),
+            Some(Some(AgentStatus::Done)),
+            "the first report on a reattached link is stored state"
+        );
+        assert_eq!(
+            term.take_replayed_agent_status(),
+            None,
+            "only one taker gets it"
+        );
+
+        report(AgentStatus::Working, &mut daemon_side);
+        assert!(poll(AgentStatus::Working), "the live status should land");
+        assert_eq!(
+            term.take_replayed_agent_status(),
+            None,
+            "everything after the replay is something the client watched happen"
+        );
+    }
+
+    /// A pane with no agent session to replay sends no status frame at all, so
+    /// the replay window has to close on its own — otherwise the first report
+    /// from an agent launched *later* would be discounted as stored state.
+    #[test]
+    fn live_output_closes_the_replay_window() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term =
+            RemoteTerminal::from_stream_reattached(client_side, TermSize::new(80, 24)).unwrap();
+
+        DaemonMsg::Output(b"$ claude\r\n".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Done,
+            message: None,
+            session_id: Some("sid-1".into()),
+            launch_argv: None,
+            rich: true,
+            cwd: None,
+            activity: 0,
+            turns: 0,
+        }))
+        .encode(&mut daemon_side)
+        .unwrap();
+        daemon_side.flush().unwrap();
+
+        for _ in 0..200 {
+            if term.agent_session().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            term.agent_session().map(|s| s.status),
+            Some(AgentStatus::Done),
+            "the status still lands"
+        );
+        assert_eq!(
+            term.take_replayed_agent_status(),
+            None,
+            "a report that follows live output is live"
+        );
     }
 
     #[test]
