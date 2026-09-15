@@ -191,6 +191,26 @@ pub struct ShellParts {
     pub(crate) owner: Option<crate::core::session::WorkspaceId>,
 }
 
+/// What the reader was last shown of each pane's finished agent turn, kept for
+/// the life of the app rather than of a view.
+///
+/// A view is thrown away and built again over the same daemon pane whenever a
+/// workspace is switched out and back or a window is reopened from the tray,
+/// and a fresh view sees a `Done` agent arrive from nothing — exactly what a
+/// turn finishing live looks like. This is how the new view tells the two apart
+/// (#870).
+#[derive(Default)]
+struct AgentReadMarks(std::collections::HashMap<(crate::ui::host_ops::HostId, u64), AgentReadMark>);
+
+impl gpui::Global for AgentReadMarks {}
+
+#[derive(Clone)]
+struct AgentReadMark {
+    session: (Option<String>, Option<Vec<String>>),
+    turns: u64,
+    unread: bool,
+}
+
 #[derive(Clone, Copy)]
 struct DragScroll {
     overshoot: f32,
@@ -396,6 +416,9 @@ pub struct TerminalView {
     agent_was_rich: bool,
     agent_result_unread: bool,
     keep_unread_on_focus: bool,
+    /// Whether this view has seen its pane's agent status move at all. The
+    /// first move is where a rebuilt view consults [`AgentReadMarks`].
+    agent_status_seen: bool,
     git_status_cwd: Option<std::path::PathBuf>,
     last_agent_activity: u64,
     cmd: CmdEditor,
@@ -1431,6 +1454,7 @@ impl TerminalView {
                     view.keep_unread_on_focus = false;
                 } else {
                     view.agent_result_unread = false;
+                    view.note_agent_result_unread(cx);
                 }
                 view.report_focus_change(true);
                 cx.notify();
@@ -1592,6 +1616,7 @@ impl TerminalView {
             agent_was_rich: false,
             agent_result_unread: false,
             keep_unread_on_focus: false,
+            agent_status_seen: false,
             git_status_cwd: None,
             last_agent_activity: 0,
             cmd: CmdEditor::new(),
@@ -1871,9 +1896,41 @@ impl TerminalView {
         self.agent_result_unread
     }
 
-    pub fn mark_agent_result_unread(&mut self, refocus_incoming: bool) {
+    pub fn mark_agent_result_unread(&mut self, refocus_incoming: bool, cx: &mut App) {
         self.agent_result_unread = true;
         self.keep_unread_on_focus = refocus_incoming;
+        self.note_agent_result_unread(cx);
+    }
+
+    /// Leave what the reader has seen of this pane's agent where the pane's
+    /// next view will look for it — see [`AgentReadMarks`]. Anything but a
+    /// finished turn drops the mark: whatever finishes next is news.
+    fn record_agent_read_mark(&self, turns: u64, cx: &mut App) {
+        let key = (self.host_id, self.pane_id);
+        let marks = &mut cx.default_global::<AgentReadMarks>().0;
+        if self.last_agent_status == Some(crate::core::cli_agent::AgentStatus::Done) {
+            marks.insert(
+                key,
+                AgentReadMark {
+                    session: self.last_agent_session.clone(),
+                    turns,
+                    unread: self.agent_result_unread,
+                },
+            );
+        } else {
+            marks.remove(&key);
+        }
+    }
+
+    /// Carry a change to the badge alone into the mark the last status left.
+    fn note_agent_result_unread(&self, cx: &mut App) {
+        if !cx.has_global::<AgentReadMarks>() {
+            return;
+        }
+        let key = (self.host_id, self.pane_id);
+        if let Some(mark) = cx.global_mut::<AgentReadMarks>().0.get_mut(&key) {
+            mark.unread = self.agent_result_unread;
+        }
     }
 
     pub fn git_status(&self, cx: &App) -> Option<crate::terminal::git_status::GitStatus> {
@@ -3921,6 +3978,30 @@ impl TerminalView {
             return false;
         }
         let prev = std::mem::replace(&mut self.last_agent_status, status);
+        let first_sight = !std::mem::replace(&mut self.agent_status_seen, true);
+        let turns = session.as_ref().map_or(0, |s| s.turns);
+
+        // A view built over a pane that already holds a finished turn sees
+        // `Done` arrive from nothing, the same as a turn finishing now. If the
+        // pane's previous view left a mark for this session at this turn count,
+        // it is the turn the reader was already shown: take their badge back as
+        // they left it instead of raising a new one (#870). A turn that
+        // finished after the old view went has no such mark, or a lower count.
+        if first_sight
+            && status == Some(AgentStatus::Done)
+            && let Some(mark) = cx
+                .try_global::<AgentReadMarks>()
+                .and_then(|marks| marks.0.get(&(self.host_id, self.pane_id)))
+                .filter(|mark| mark.session == self.last_agent_session && mark.turns == turns)
+                .cloned()
+        {
+            self.agent_result_unread = mark.unread && !self.focus_handle.is_focused(window);
+            self.keep_unread_on_focus = false;
+            self.record_agent_read_mark(turns, cx);
+            cx.notify();
+            return false;
+        }
+
         let turn_finished = status == Some(AgentStatus::Done) && prev != Some(AgentStatus::Done);
 
         match status {
@@ -3940,6 +4021,7 @@ impl TerminalView {
                 self.keep_unread_on_focus = false;
             }
         }
+        self.record_agent_read_mark(turns, cx);
 
         let rich = session.as_ref().is_some_and(|s| s.rich);
         let agent_name = self
@@ -9882,6 +9964,7 @@ mod gpui_tests {
                 rich: true,
                 cwd: None,
                 activity: 0,
+                turns: 0,
             }))
             .encode(daemon)
             .unwrap();
@@ -9937,6 +10020,7 @@ mod gpui_tests {
             rich: true,
             cwd: None,
             activity: 0,
+            turns: 0,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -9982,9 +10066,20 @@ mod gpui_tests {
         cx: &mut TestAppContext,
         daemon: &mut Stream,
     ) {
+        report_agent_turn(status, 0, pane, cx, daemon);
+    }
+
+    /// The same, for a session that has finished `turns` turns so far.
+    fn report_agent_turn(
+        status: crate::core::cli_agent::AgentStatus,
+        turns: u64,
+        pane: &gpui::Entity<TerminalView>,
+        cx: &mut TestAppContext,
+        daemon: &mut Stream,
+    ) {
         use crate::core::cli_agent::AgentSessionState;
 
-        DaemonMsg::AgentStatus(Some(AgentSessionState {
+        let state = AgentSessionState {
             status,
             message: None,
             session_id: Some("sid-abc".into()),
@@ -9992,18 +10087,173 @@ mod gpui_tests {
             rich: true,
             cwd: None,
             activity: 0,
-        }))
-        .encode(daemon)
-        .unwrap();
+            turns,
+        };
+        DaemonMsg::AgentStatus(Some(state.clone()))
+            .encode(daemon)
+            .unwrap();
         for _ in 0..200 {
-            if cx.update(|cx| pane.read(cx).terminal.agent_session().map(|s| s.status))
-                == Some(status)
-            {
+            if cx.update(|cx| pane.read(cx).terminal.agent_session()) == Some(state.clone()) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the agent status never reached the pane");
+    }
+
+    /// Poll `pane`'s agent status inside `window` and read its badge back.
+    fn poll_unread(
+        window: gpui::WindowHandle<TerminalView>,
+        pane: &gpui::Entity<TerminalView>,
+        cx: &mut TestAppContext,
+    ) -> bool {
+        // Through the untyped handle: the typed one leases the root view, and
+        // `pane` may be that view.
+        cx.update_window(window.into(), |_, window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.poll_agent_status(false, window, cx);
+                pane.agent_result_unread()
+            })
+        })
+        .unwrap()
+    }
+
+    /// Switching workspaces, or reopening a window from the tray, throws the
+    /// pane's view away and builds a new one on the same daemon pane (#870).
+    /// The new view's first look at a `Done` agent is not a turn finishing —
+    /// the reader watched that one finish before the old view went.
+    #[gpui::test]
+    fn a_rebuilt_pane_does_not_re_badge_a_turn_the_reader_already_saw(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &before, cx, &mut before_daemon);
+        assert!(
+            !poll_unread(window, &before, cx),
+            "the reader watched it finish"
+        );
+
+        // The same daemon pane, rebuilt the way `tabs_from_session` rebuilds it,
+        // with the reader's focus somewhere else.
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &after, cx, &mut daemon);
+        assert!(
+            !poll_unread(window, &after, cx),
+            "rebuilding the pane is not a turn finishing"
+        );
+    }
+
+    /// What the rebuild must not swallow: a turn that was still running when
+    /// the view went away and finished before the new one arrived.
+    #[gpui::test]
+    fn a_turn_that_finished_while_the_pane_was_away_still_badges(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Working, 0, &before, cx, &mut before_daemon);
+        assert!(!poll_unread(window, &before, cx));
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &after, cx, &mut daemon);
+        assert!(
+            poll_unread(window, &after, cx),
+            "nobody saw this turn finish"
+        );
+    }
+
+    /// Nor a whole later turn: the reader saw turn one, the agent was sent
+    /// another and finished it while the pane was away. The status reads
+    /// `Done` both times; only the turn count tells them apart.
+    #[gpui::test]
+    fn a_later_turn_that_finished_while_the_pane_was_away_still_badges(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &before, cx, &mut before_daemon);
+        assert!(!poll_unread(window, &before, cx));
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 2, &after, cx, &mut daemon);
+        assert!(
+            poll_unread(window, &after, cx),
+            "the second turn finished unseen"
+        );
+    }
+
+    /// And a badge the reader had not cleared yet comes back with the pane.
+    #[gpui::test]
+    fn an_unread_turn_is_still_unread_after_the_pane_is_rebuilt(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        // Building another pane takes the window's focus off `before`.
+        let (_elsewhere, _elsewhere_daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(5, window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &before, cx, &mut before_daemon);
+        assert!(poll_unread(window, &before, cx), "nobody was looking");
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &after, cx, &mut daemon);
+        assert!(
+            poll_unread(window, &after, cx),
+            "rebuilding the pane is not reading it"
+        );
     }
 
     /// The badge answers "did the reader see this?", so it has to read the
@@ -10103,6 +10353,7 @@ mod gpui_tests {
             rich: true,
             cwd: Some(working_in.clone()),
             activity: 0,
+            turns: 0,
         }))
         .encode(&mut daemon)
         .unwrap();

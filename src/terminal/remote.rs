@@ -5630,6 +5630,7 @@ mod tests {
             rich: true,
             cwd: None,
             activity: 0,
+            turns: 0,
         }))
         .encode(&mut daemon_side)
         .unwrap();
