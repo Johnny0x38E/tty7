@@ -714,6 +714,12 @@ pub struct AgentSessionState {
     pub cwd: Option<std::path::PathBuf>,
     #[serde(default)]
     pub activity: u64,
+    /// How many turns this session has finished: bumped each time it settles
+    /// into `Done`. The status alone cannot tell a client that attaches to a
+    /// `Done` pane whether that is the turn it already showed the reader or a
+    /// later one that finished while nobody was watching (#870).
+    #[serde(default)]
+    pub turns: u64,
 }
 
 impl AgentStatus {
@@ -767,6 +773,9 @@ impl AgentSessionState {
                 }
             }
             AgentEventKind::Stop => {
+                if self.status != AgentStatus::Done {
+                    self.turns = self.turns.wrapping_add(1);
+                }
                 self.status = AgentStatus::Done;
                 self.message = ev.message.clone();
             }
@@ -1271,6 +1280,36 @@ mod tests {
 
         s.apply_event(&ev(AgentEventKind::SessionEnd));
         assert_eq!(s.activity, 4);
+    }
+
+    #[test]
+    fn each_finished_turn_is_counted_once() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+        };
+
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        assert_eq!(s.turns, 0, "a turn starting has not finished anything");
+
+        s.apply_event(&ev(AgentEventKind::Stop));
+        assert_eq!(s.turns, 1);
+        s.apply_event(&ev(AgentEventKind::Stop));
+        assert_eq!(s.turns, 1, "a repeated stop is the same turn");
+        s.apply_event(&ev(AgentEventKind::Notification));
+        assert_eq!(s.turns, 1);
+
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::Stop));
+        assert_eq!(s.turns, 2, "a second turn is a second count");
+
+        s.apply_event(&ev(AgentEventKind::SessionEnd));
+        assert_eq!(s.turns, 2);
     }
 
     #[test]
