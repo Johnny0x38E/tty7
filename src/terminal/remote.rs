@@ -890,6 +890,17 @@ impl RemoteTerminal {
 
         let read_half = stream.try_clone()?;
 
+        // A relink keeps the view, and the view keeps the status it last saw
+        // before the link dropped. That is already a baseline, and the better
+        // one: if the agent finished its turn while the link was down, the
+        // daemon's replayed `Done` against the view's `Working` is exactly the
+        // edge the reader must be told about. So the relink's replay is read
+        // as a live report, and a cold-attach mark nobody took yet is dropped
+        // rather than left to swallow that edge.
+        if let Ok(mut guard) = self.agent_session.lock() {
+            guard.replayed = false;
+        }
+
         self.exited_flag.store(false, Ordering::SeqCst);
         self.exited = false;
         {
@@ -915,10 +926,10 @@ impl RemoteTerminal {
                 remote: self.remote_context.clone(),
                 agent: self.agent.clone(),
                 agent_session: self.agent_session.clone(),
-                // A relink attaches to the pane all over again, so the daemon
-                // replays its stored agent status down the new link just as it
-                // does on a cold attach.
-                awaiting_replay: true,
+                // The daemon does replay the stored status down this link, but
+                // the view already has a baseline from before the drop — see
+                // above.
+                awaiting_replay: false,
                 exited: self.exited_flag.clone(),
                 child_exited: self.child_exited.clone(),
                 zle_reading: self.zle_reading.clone(),

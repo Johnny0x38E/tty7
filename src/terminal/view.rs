@@ -10127,6 +10127,67 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// A relink keeps the view and what it last saw. A turn that was running
+    /// when the link dropped and finished before it came back reaches the view
+    /// only as the daemon's replay, and that replay has to badge: nobody saw
+    /// the turn finish.
+    #[gpui::test]
+    fn a_turn_that_finished_while_the_link_was_down_still_badges(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let (pane, mut daemon) = window
+            .update(cx, |_, window, cx| {
+                super::quiet_reattached_test_pane(2, window, cx)
+            })
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        report_agent_status(AgentStatus::Working, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(!pane.agent_result_unread(), "the turn is still running");
+                });
+            })
+            .unwrap();
+
+        let (new_client, mut new_daemon) = super::test_stream_pair();
+        pane.update(cx, |pane, cx| {
+            pane.adopt_relink(
+                new_client,
+                Vec::new(),
+                &crate::terminal::PaneRoute::Local,
+                TermSize::new(80, 24),
+                8,
+                17,
+                cx,
+            )
+            .expect("the swap itself cannot fail");
+        });
+        drop(daemon);
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut new_daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(
+                        pane.agent_result_unread(),
+                        "the turn finished while the link was down, so nobody read it"
+                    );
+                });
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn a_finished_turn_on_the_focused_pane_is_already_read(cx: &mut TestAppContext) {
         use crate::core::cli_agent::AgentStatus;
