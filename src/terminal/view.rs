@@ -207,6 +207,11 @@ impl gpui::Global for AgentReadMarks {}
 #[derive(Clone)]
 struct AgentReadMark {
     session: (Option<String>, Option<Vec<String>>),
+    /// The status the pane's last view saw. Kept for every status, not only
+    /// `Done`, so that a pane with no mark at all is one this app never watched
+    /// an agent in — the only case where a reattach's replayed status may be
+    /// taken as a baseline (see `poll_agent_status`).
+    status: Option<crate::core::cli_agent::AgentStatus>,
     turns: u64,
     unread: bool,
 }
@@ -1903,23 +1908,20 @@ impl TerminalView {
     }
 
     /// Leave what the reader has seen of this pane's agent where the pane's
-    /// next view will look for it — see [`AgentReadMarks`]. Anything but a
-    /// finished turn drops the mark: whatever finishes next is news.
+    /// next view will look for it — see [`AgentReadMarks`]. A mark left at any
+    /// status other than `Done` never vouches for a finished turn, but it still
+    /// records that this app was watching: a turn that was running when the
+    /// view went and finished before the next one came must badge.
     fn record_agent_read_mark(&self, turns: u64, cx: &mut App) {
-        let key = (self.host_id, self.pane_id);
-        let marks = &mut cx.default_global::<AgentReadMarks>().0;
-        if self.last_agent_status == Some(crate::core::cli_agent::AgentStatus::Done) {
-            marks.insert(
-                key,
-                AgentReadMark {
-                    session: self.last_agent_session.clone(),
-                    turns,
-                    unread: self.agent_result_unread,
-                },
-            );
-        } else {
-            marks.remove(&key);
-        }
+        cx.default_global::<AgentReadMarks>().0.insert(
+            (self.host_id, self.pane_id),
+            AgentReadMark {
+                session: self.last_agent_session.clone(),
+                status: self.last_agent_status,
+                turns,
+                unread: self.agent_result_unread,
+            },
+        );
     }
 
     /// Carry a change to the badge alone into the mark the last status left.
@@ -3957,15 +3959,31 @@ impl TerminalView {
         use crate::core::cli_agent::AgentStatus;
 
         // Attaching to a pane the daemon kept alive — the app restarting onto
-        // last session's tabs, a dropped link coming back — has the daemon
-        // replay the pane's stored agent status as an ordinary report. It is a
-        // baseline, not an edge: the turn it describes ended before this view
-        // existed, often before this process did, and reading it as "a result
-        // just landed" is what used to bring every restored agent tab up
-        // wearing an unread badge for output its reader had long since read.
-        if let Some(restored) = self.terminal.take_replayed_agent_status() {
-            self.last_agent_status = restored;
-        }
+        // last session's tabs above all — has the daemon replay the pane's
+        // stored agent status as an ordinary report. When this app has never
+        // watched the pane, that is a baseline, not an edge: the turn it
+        // describes ended before this view existed, often before this process
+        // did, and reading it as "a result just landed" is what used to bring
+        // every restored agent tab up wearing an unread badge for output its
+        // reader had long since read.
+        //
+        // When an earlier view of this app did watch the pane (a workspace
+        // switched out and back, a window reopened from the tray), its read
+        // mark knows more than the replay does, so the replay stays an edge and
+        // the mark decides below: the same finished turn takes its badge back
+        // as the reader left it, anything else is news (#870).
+        let adopted_baseline = match self.terminal.take_replayed_agent_status() {
+            Some(restored)
+                if !cx
+                    .try_global::<AgentReadMarks>()
+                    .is_some_and(|marks| marks.0.contains_key(&(self.host_id, self.pane_id))) =>
+            {
+                self.last_agent_status = restored;
+                self.agent_status_seen = true;
+                true
+            }
+            _ => false,
+        };
 
         let session = self.terminal.agent_session();
         if session.as_ref().is_some_and(|s| s.rich) {
@@ -3985,12 +4003,17 @@ impl TerminalView {
         }
 
         let status = session.as_ref().map(|s| s.status);
+        let turns = session.as_ref().map_or(0, |s| s.turns);
+        if adopted_baseline {
+            // From here on this app is watching the pane, so a later rebuild
+            // must find a mark rather than adopt its own replay.
+            self.record_agent_read_mark(turns, cx);
+        }
         if status == self.last_agent_status {
             return false;
         }
         let prev = std::mem::replace(&mut self.last_agent_status, status);
         let first_sight = !std::mem::replace(&mut self.agent_status_seen, true);
-        let turns = session.as_ref().map_or(0, |s| s.turns);
 
         // A view built over a pane that already holds a finished turn sees
         // `Done` arrive from nothing, the same as a turn finishing now. If the
@@ -4003,7 +4026,11 @@ impl TerminalView {
             && let Some(mark) = cx
                 .try_global::<AgentReadMarks>()
                 .and_then(|marks| marks.0.get(&(self.host_id, self.pane_id)))
-                .filter(|mark| mark.session == self.last_agent_session && mark.turns == turns)
+                .filter(|mark| {
+                    mark.status == Some(AgentStatus::Done)
+                        && mark.session == self.last_agent_session
+                        && mark.turns == turns
+                })
                 .cloned()
         {
             self.agent_result_unread = mark.unread && !self.focus_handle.is_focused(window);
@@ -10387,6 +10414,75 @@ mod gpui_tests {
                 });
             })
             .unwrap();
+    }
+
+    /// Build `pane_id`'s first view (unfocused), let it watch `status` at
+    /// `turns`, then rebuild the pane the way restoring a workspace does — a
+    /// reattach, whose head is the daemon replaying `replayed` — and read the
+    /// rebuilt view's badge.
+    fn rebuild_by_reattach(
+        watched: (crate::core::cli_agent::AgentStatus, u64),
+        replayed: (crate::core::cli_agent::AgentStatus, u64),
+        cx: &mut TestAppContext,
+    ) -> bool {
+        let (window, _root_daemon) = harness(cx);
+        let focus_root = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.focus_handle.clone().focus(window, cx)
+                })
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let (before, mut before_daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(2, window, cx))
+            .unwrap();
+        focus_root(cx);
+        report_agent_turn(watched.0, watched.1, &before, cx, &mut before_daemon);
+        poll_unread(window, &before, cx);
+        drop(before);
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| {
+                super::quiet_reattached_test_pane(2, window, cx)
+            })
+            .unwrap();
+        focus_root(cx);
+        report_agent_turn(replayed.0, replayed.1, &after, cx, &mut daemon);
+        poll_unread(window, &after, cx)
+    }
+
+    /// A reattach whose pane this app already watched is a rebuild, not a
+    /// restart: the read mark, not the replay, says whether the turn is news.
+    #[gpui::test]
+    fn a_reattached_pane_takes_back_the_badge_its_reader_left(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        assert!(
+            rebuild_by_reattach((AgentStatus::Done, 1), (AgentStatus::Done, 1), cx),
+            "the reader never cleared that badge; rebuilding the pane is not reading it"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reattached_pane_badges_a_turn_that_was_running_when_its_view_went(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::cli_agent::AgentStatus;
+        assert!(
+            rebuild_by_reattach((AgentStatus::Working, 0), (AgentStatus::Done, 1), cx),
+            "nobody saw this turn finish"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reattached_pane_badges_a_later_turn_that_finished_while_away(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        // Turn one left a mark; turn two finishing before the reattach is a
+        // different count, so the mark does not vouch for it.
+        assert!(
+            rebuild_by_reattach((AgentStatus::Done, 1), (AgentStatus::Done, 2), cx),
+            "the second turn finished unseen"
+        );
     }
 
     /// A relink keeps the view and what it last saw. A turn that was running
