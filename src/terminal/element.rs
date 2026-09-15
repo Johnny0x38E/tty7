@@ -249,9 +249,44 @@ fn snapshot_cell(
         rc.selected = true;
     }
     if flags.contains(Flags::DIM) {
-        rc.fg.a *= DIM_OPACITY;
+        rc.fg = dim_fg(rc.fg, bgc, colors.legible_dim);
     }
     rc
+}
+
+/// SGR 2's colour: the ink at `DIM_OPACITY` over its cell, or — on a light
+/// cell where that fade would be illegible — the opaque ink
+/// `presets::legible_dim` solved for. `legible` is Settings → Appearance's
+/// palette switch; off keeps the plain fade everywhere.
+fn dim_fg(fg: Hsla, under: Rgb, legible: bool) -> Hsla {
+    let mut faded = fg;
+    faded.a *= DIM_OPACITY;
+    if !legible {
+        return faded;
+    }
+    // A faint run is one (ink, background) pair repeated across the row, and
+    // the rescue is a contrast bisection — remember the last answer so a
+    // screen of dim text costs one solve per colour change, not one per cell.
+    thread_local! {
+        static LAST: std::cell::Cell<Option<(u32, u32, Option<u32>)>> =
+            const { std::cell::Cell::new(None) };
+    }
+    let (ink, bg) = (pack_rgb(super::palette::hsla_to_rgb(fg)), pack_rgb(under));
+    let solved = LAST.with(|last| match last.get() {
+        Some((i, b, s)) if i == ink && b == bg => s,
+        _ => {
+            let s = crate::ui::presets::legible_dim(ink, bg, DIM_OPACITY);
+            last.set(Some((ink, bg, s)));
+            s
+        }
+    });
+    match solved {
+        Some(c) => Hsla {
+            a: fg.a,
+            ..to_hsla(unpack_rgb(c))
+        },
+        None => faded,
+    }
 }
 
 fn active_selection_bg(cx: &gpui::App) -> Rgb {
@@ -305,6 +340,9 @@ pub(super) struct PaintColors {
     current_match_bg: Hsla,
     fg_rgb: Rgb,
     bg_rgb: Rgb,
+    /// Whether faint text on a light cell is held at the text floor (see
+    /// `dim_fg`). Mirrors `theme_legible_palette`.
+    legible_dim: bool,
 }
 
 /// The under-colour a dimmed pane blends its content toward: the window
@@ -444,6 +482,9 @@ impl PaintColors {
             current_match_bg,
             fg_rgb,
             bg_rgb,
+            legible_dim: cx
+                .try_global::<Config>()
+                .is_none_or(|c| c.theme_legible_palette),
         }
     }
 
@@ -466,6 +507,7 @@ impl PaintColors {
             current_match_bg: blend_toward(self.current_match_bg, dim, under),
             fg_rgb: self.fg_rgb,
             bg_rgb: self.bg_rgb,
+            legible_dim: self.legible_dim,
         }
     }
 }
@@ -2412,6 +2454,7 @@ mod tests {
             selection_bg: Hsla::default(),
             match_bg: Hsla::default(),
             current_match_bg: Hsla::default(),
+            legible_dim: true,
             fg_rgb: Rgb {
                 r: 17,
                 g: 17,
@@ -3600,6 +3643,7 @@ mod tests {
             current_match_bg: wash(0.85),
             fg_rgb: fg,
             bg_rgb: bg,
+            legible_dim: true,
         }
     }
 
@@ -3720,6 +3764,167 @@ mod tests {
             rc.fg.a < colors.default_fg.a,
             "SGR 2 text must paint with reduced intensity"
         );
+    }
+
+    /// What a cell's foreground lands on screen as: its rgb composited over
+    /// the cell background by its alpha, the way the glyph is actually drawn.
+    fn on_screen(fg: Hsla, under: Rgb) -> u32 {
+        let c = Rgba::from(fg);
+        let ch = |v: f32, u: u8| ((v * c.a + (u as f32 / 255.) * (1. - c.a)) * 255.).round() as u32;
+        ch(c.r, under.r) << 16 | ch(c.g, under.g) << 8 | ch(c.b, under.b)
+    }
+
+    /// The colours a pane on builtin `t` resolves cells with.
+    fn builtin_colors(t: &crate::ui::presets::Theme) -> (PaintColors, [Rgb; 256]) {
+        let (fg, bg) = (unpack_rgb(t.foreground), unpack_rgb(t.background_color()));
+        let mut colors = test_colors();
+        colors.default_fg = to_hsla(fg);
+        colors.default_bg = to_hsla(bg);
+        colors.fg_rgb = fg;
+        colors.bg_rgb = bg;
+        let mut palette = super::super::palette::build();
+        palette[..16].copy_from_slice(&t.active_palette(true).ansi16);
+        (colors, palette)
+    }
+
+    /// Every colour faint text is commonly written in: the default foreground,
+    /// the sixteen palette slots, the 256-colour greys apps reach for as
+    /// "muted", and a truecolour grey.
+    fn faint_samples() -> Vec<(String, AnsiColor)> {
+        let mut v = vec![("fg".to_string(), AnsiColor::Named(NamedColor::Foreground))];
+        for i in 0..16u8 {
+            v.push((format!("ansi{i}"), AnsiColor::Indexed(i)));
+        }
+        for i in [240u8, 244, 248, 250] {
+            v.push((format!("256:{i}"), AnsiColor::Indexed(i)));
+        }
+        v.push((
+            "#999999".to_string(),
+            AnsiColor::Spec(Rgb {
+                r: 153,
+                g: 153,
+                b: 153,
+            }),
+        ));
+        v
+    }
+
+    /// (plain, faint) on-screen colours of `color` as a pane on `t` paints them.
+    fn plain_and_faint(
+        colors: &PaintColors,
+        palette: &[Rgb; 256],
+        color: AnsiColor,
+    ) -> (RenderCell, RenderCell) {
+        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let mut cell = Cell {
+            c: 'x',
+            fg: color,
+            ..Cell::default()
+        };
+        let plain = snapshot_cell(&cell, point, palette, colors, None);
+        cell.flags = Flags::DIM;
+        let faint = snapshot_cell(&cell, point, palette, colors, None);
+        (plain, faint)
+    }
+
+    #[test]
+    fn faint_text_keeps_the_text_floor_on_every_light_builtin() {
+        // #858: SGR 2 painted the ink at 66% over the cell, which on a light
+        // background took Catppuccin Latte's foreground to 3.2:1 and every
+        // bright-black the palette rescue had lifted to 4.5:1 back to ~2.5:1.
+        // Faint text on a light cell must now clear 4.5:1 — or, for an ink
+        // that never cleared it undimmed, stay at the ink's own ratio.
+        use crate::ui::presets::{builtins, contrast};
+        let mut failures = Vec::new();
+        eprintln!("| theme | colour | plain | faint |");
+        for t in builtins().into_iter().filter(|t| !t.dark) {
+            let (colors, palette) = builtin_colors(&t);
+            let bg = t.background_color();
+            for (name, color) in faint_samples() {
+                let (plain, faint) = plain_and_faint(&colors, &palette, color);
+                let plain = contrast(on_screen(plain.fg, colors.bg_rgb), bg);
+                let faint = contrast(on_screen(faint.fg, colors.bg_rgb), bg);
+                eprintln!("| {} | {name} | {plain:.2} | {faint:.2} |", t.id);
+                if faint < 4.5_f32.min(plain) - 0.05 {
+                    failures.push(format!(
+                        "{}/{name}: faint {faint:.2}:1 (plain {plain:.2}:1)",
+                        t.id
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "faint text under the floor:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn faint_text_on_dark_builtins_is_the_plain_fade() {
+        // The floor is a light-background rescue: every dark builtin must
+        // keep painting SGR 2 exactly as it did, as the ink at DIM_OPACITY.
+        for t in crate::ui::presets::builtins()
+            .into_iter()
+            .filter(|t| t.dark)
+        {
+            let (colors, palette) = builtin_colors(&t);
+            for (name, color) in faint_samples() {
+                let (plain, faint) = plain_and_faint(&colors, &palette, color);
+                let mut fade = plain.fg;
+                fade.a *= DIM_OPACITY;
+                assert_eq!(
+                    faint.fg, fade,
+                    "{}/{name}: dark theme faint text changed",
+                    t.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn faint_text_stays_fainter_than_plain_text() {
+        // The rescue buys legibility, not a restyle: faint text never gains
+        // contrast over its own ink, and an ink with room to spare above the
+        // floor still reads visibly fainter.
+        use crate::ui::presets::{builtins, contrast};
+        for t in builtins() {
+            let (colors, palette) = builtin_colors(&t);
+            let bg = t.background_color();
+            for (name, color) in faint_samples() {
+                let (plain, faint) = plain_and_faint(&colors, &palette, color);
+                let plain = contrast(on_screen(plain.fg, colors.bg_rgb), bg);
+                let faint = contrast(on_screen(faint.fg, colors.bg_rgb), bg);
+                assert!(
+                    faint <= plain + 0.01,
+                    "{}/{name}: faint {faint:.2} > plain {plain:.2}",
+                    t.id
+                );
+                if plain >= 6.0 {
+                    assert!(
+                        faint <= plain * 0.85,
+                        "{}/{name}: faint {faint:.2} no longer reads fainter than {plain:.2}",
+                        t.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn faint_text_is_the_plain_fade_with_the_legibility_switch_off() {
+        // Settings → Appearance's palette switch off renders colours as
+        // authored; that includes faint text.
+        for t in crate::ui::presets::builtins() {
+            let (mut colors, palette) = builtin_colors(&t);
+            colors.legible_dim = false;
+            for (name, color) in faint_samples() {
+                let (plain, faint) = plain_and_faint(&colors, &palette, color);
+                let mut fade = plain.fg;
+                fade.a *= DIM_OPACITY;
+                assert_eq!(faint.fg, fade, "{}/{name}: switch off still rescued", t.id);
+            }
+        }
     }
 
     #[test]
