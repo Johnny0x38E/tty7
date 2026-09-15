@@ -3887,6 +3887,17 @@ impl TerminalView {
     ) -> bool {
         use crate::core::cli_agent::AgentStatus;
 
+        // Attaching to a pane the daemon kept alive — the app restarting onto
+        // last session's tabs, a dropped link coming back — has the daemon
+        // replay the pane's stored agent status as an ordinary report. It is a
+        // baseline, not an edge: the turn it describes ended before this view
+        // existed, often before this process did, and reading it as "a result
+        // just landed" is what used to bring every restored agent tab up
+        // wearing an unread badge for output its reader had long since read.
+        if let Some(restored) = self.terminal.take_replayed_agent_status() {
+            self.last_agent_status = restored;
+        }
+
         let session = self.terminal.agent_session();
         if session.as_ref().is_some_and(|s| s.rich) {
             self.agent_was_rich = true;
@@ -9695,6 +9706,22 @@ pub(crate) fn quiet_test_pane(
     (view, daemon_side)
 }
 
+/// The same pane, but reattached rather than spawned — what restoring last
+/// session's tabs builds, and the only shape in which the daemon replays state
+/// the pane already had.
+#[cfg(test)]
+pub(crate) fn quiet_reattached_test_pane(
+    pane_id: u64,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    let (client_side, daemon_side) = test_stream_pair();
+    let terminal = RemoteTerminal::from_stream_reattached(client_side, TermSize::new(80, 24))
+        .expect("quiet reattached test terminal");
+    let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
+    (view, daemon_side)
+}
+
 /// A quiet pane that was dialled by hand, with no saved host behind it.
 ///
 /// Ungated on purpose: the transport this hands back is already
@@ -10034,6 +10061,67 @@ mod gpui_tests {
                 pane.update(cx, |pane, cx| {
                     pane.poll_agent_status(false, window, cx);
                     assert!(pane.agent_result_unread(), "nobody was looking at the pane");
+                });
+            })
+            .unwrap();
+    }
+
+    /// Reinstalling or restarting the app leaves the daemon — and every agent
+    /// in it — running, so each restored tab reattaches to a pane whose agent
+    /// finished its turn long ago. The daemon replays that status, and reading
+    /// it as a turn that just landed put an unread badge on every agent tab in
+    /// the window the moment it opened.
+    #[gpui::test]
+    fn a_restored_pane_does_not_badge_the_turn_it_reattached_to(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let (pane, mut daemon) = window
+            .update(cx, |_, window, cx| {
+                super::quiet_reattached_test_pane(2, window, cx)
+            })
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(
+                        !pane.agent_result_unread(),
+                        "the replayed status is where this pane starts, not a result that \
+                         just arrived"
+                    );
+                });
+            })
+            .unwrap();
+
+        // And the pane is still armed: the next turn it actually watches finish
+        // badges exactly as it would have without the reattach.
+        report_agent_status(AgentStatus::Working, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                });
+            })
+            .unwrap();
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(
+                        pane.agent_result_unread(),
+                        "a turn that finished while the reader was elsewhere is unread"
+                    );
                 });
             })
             .unwrap();
