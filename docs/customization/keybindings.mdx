@@ -39,12 +39,31 @@ the panel tabs. They are all in the command palette, and all bindable here.
 ```json
 {
   "keybindings": {
-    "SplitRight": "cmd-d",
+    "NextTab": "cmd-shift-]",
+    "SplitRight": ["cmd-d"],
     "ResizePaneLeft": "ctrl-alt-left",
-    "ToggleSftp": "cmd-shift-u"
+    "ToggleFullscreen": ""
   }
 }
 ```
+
+An action's value takes one of two shapes:
+
+| Value | Means |
+|---|---|
+| `"cmd-shift-]"` | **Add** this shortcut. The default keeps working — <kbd>⌃ ⇥</kbd> still switches tabs |
+| `["cmd-d"]` | **Replace**: exactly these shortcuts, nothing else. List several to have several |
+| `""` or `[]` | **Unbind** the action |
+
+Recording a shortcut on the Settings page replaces, so it writes the list
+shape. A shortcut you add that another action already uses is the one that
+runs. The exception is the terminal's own shortcuts: copy, paste, find, clear
+scrollback and insert newline keep theirs while a terminal has focus.
+
+Up to 26.9.2 a string replaced the default, and the Settings page wrote
+strings. So a shortcut you recorded in those versions now works *beside* the
+default it was meant to replace. To drop the default again, record the shortcut again
+or wrap it in a list: `"NewTab": ["cmd-shift-n"]`.
 
 The syntax is modifiers joined by `-`, then the key. Chords are separated by a
 space.

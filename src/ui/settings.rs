@@ -7200,7 +7200,7 @@ impl Tty7App {
             )
         };
         let tmux = preset == "tmux";
-        let effective = crate::ui::keymap::effective_bindings(cx);
+        let effective = crate::ui::keymap::effective_chords(cx);
 
         let recording = self
             .active_settings()
@@ -7308,7 +7308,7 @@ impl Tty7App {
         let filtering = !query.is_empty() && section_match_count(section, &query) > 0;
         let mut grouped: Vec<(
             crate::ui::palette::CommandGroup,
-            Vec<(String, String, String)>,
+            Vec<(String, Vec<String>, String)>,
         )> = Vec::new();
         for (action, key) in effective {
             if filtering && !keybinding_matches_query(&action, &query) {
@@ -7330,7 +7330,7 @@ impl Tty7App {
                 .position(|o| o == g)
                 .unwrap_or(usize::MAX)
         });
-        let rows: Vec<(String, String, String)> = grouped
+        let rows: Vec<(String, Vec<String>, String)> = grouped
             .iter()
             .flat_map(|(_, rows)| rows.iter().cloned())
             .collect();
@@ -7414,7 +7414,23 @@ impl Tty7App {
                     .child("—")
                     .into_any_element()
             } else {
-                keycaps(&key).into_any_element()
+                // An action can answer to more than one chord — its default and
+                // one added beside it in config.json (#868) — and this is the
+                // one page that lists them, so a row shows every one.
+                h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .children(key.iter().enumerate().map(|(n, spec)| {
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .when(n > 0, |d| {
+                                d.child(div().text_xs().text_color(muted).child("/"))
+                            })
+                            .child(keycaps(spec))
+                    }))
+                    .into_any_element()
             };
 
             let action_for_click = action.clone();

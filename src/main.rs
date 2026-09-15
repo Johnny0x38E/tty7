@@ -742,9 +742,10 @@ mod config_reload_tests {
     }
 
     fn bound_to_split_right(config: &mut Config, key: &str) {
-        config
-            .keybindings
-            .insert("SplitRight".to_string(), key.to_string());
+        config.keybindings.insert(
+            "SplitRight".to_string(),
+            crate::core::config::KeybindingOverride::Add(key.to_string()),
+        );
     }
 
     #[gpui::test]
@@ -821,11 +822,10 @@ mod config_reload_tests {
             );
             assert!(announced, "the breakage is announced");
             assert_eq!(
-                cx.global::<Config>()
-                    .keybindings
-                    .get("SplitRight")
-                    .map(String::as_str),
-                Some("ctrl-alt-9"),
+                cx.global::<Config>().keybindings.get("SplitRight"),
+                Some(&crate::core::config::KeybindingOverride::Add(
+                    "ctrl-alt-9".to_string()
+                )),
                 "the running config survives the broken file"
             );
             assert_eq!(

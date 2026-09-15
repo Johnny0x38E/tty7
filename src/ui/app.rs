@@ -7194,16 +7194,32 @@ impl Tty7App {
         // only `same_chord` sees it. Compared as text, the displacement never
         // fires and both bindings survive onto that keystroke, where which one
         // wins is arbitrary (#750).
-        let displaced = crate::ui::keymap::effective_bindings(cx)
+        //
+        // Only that chord moves: the action that had it keeps any others it
+        // has, since an action can carry several (#868) and emptying it would
+        // take away keys that were never on this keystroke. An extra default —
+        // Alt+Enter beside Shift+Enter — follows its action's first chord rather
+        // than being one of its own, so its owner is unbound outright, as it
+        // always was.
+        use crate::ui::keymap::same_chord;
+        let displaced: Option<(String, Vec<String>)> = crate::ui::keymap::effective_chords(cx)
             .into_iter()
-            .chain(crate::ui::keymap::extra_bindings(cx))
-            .find(|(a, k)| *a != action && crate::ui::keymap::same_chord(k, &spec))
-            .map(|(a, _)| a);
+            .find(|(a, chords)| *a != action && chords.iter().any(|k| same_chord(k, &spec)))
+            .map(|(a, chords)| {
+                let rest = chords.into_iter().filter(|k| !same_chord(k, &spec));
+                (a, rest.collect())
+            })
+            .or_else(|| {
+                crate::ui::keymap::extra_bindings(cx)
+                    .into_iter()
+                    .find(|(a, k)| *a != action && same_chord(k, &spec))
+                    .map(|(a, _)| (a, Vec::new()))
+            });
         // A trailing "…" on an action name marks a command that opens
         // something; it is not punctuation, and inside a sentence it reads as
         // the sentence trailing off — "Rename Tab… took the shortcut from".
         let in_prose = |name: &str| name.trim_end_matches('…').to_string();
-        let note = displaced.as_ref().map(|other| {
+        let note = displaced.as_ref().map(|(other, _)| {
             t_fmt(
                 L10nKey::AppKeybindingDisplacedNote,
                 &[
@@ -7218,11 +7234,17 @@ impl Tty7App {
                 ],
             )
         });
+        // Both written as lists. Recording a shortcut sets it — the row showed
+        // one chord and now shows another — and a bare string in config adds a
+        // chord beside the default instead (#868).
         self.update_config(cx, |cfg| {
-            if let Some(other) = &displaced {
-                cfg.keybindings.insert(other.clone(), String::new());
+            use crate::core::config::KeybindingOverride;
+            if let Some((other, rest)) = &displaced {
+                cfg.keybindings
+                    .insert(other.clone(), KeybindingOverride::Exact(rest.clone()));
             }
-            cfg.keybindings.insert(action, spec);
+            cfg.keybindings
+                .insert(action, KeybindingOverride::Exact(vec![spec]));
         });
         crate::ui::keymap::rebind(cx);
         if let Some(s) = self.active_settings_mut() {
@@ -10411,12 +10433,17 @@ mod keybinding_gpui_tests {
         });
     }
 
-    fn wait_for_binding(vcx: &mut VisualTestContext, action: &str, expected: &str) {
+    /// Waits for `action`'s entry in config to read `expected` — compared as the
+    /// JSON the file gets, since that is what the reader of `config.json` sees.
+    fn wait_for_binding(vcx: &mut VisualTestContext, action: &str, expected: serde_json::Value) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             vcx.background_executor.run_until_parked();
-            let got = vcx.update(|_, cx| cx.global::<Config>().keybindings.get(action).cloned());
-            if got.as_deref() == Some(expected) {
+            let got = vcx.update(|_, cx| {
+                serde_json::to_value(cx.global::<Config>().keybindings.get(action))
+                    .expect("a binding serializes")
+            });
+            if got == expected {
                 return;
             }
             assert!(
@@ -10432,7 +10459,11 @@ mod keybinding_gpui_tests {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "NewTab");
         vcx.simulate_keystrokes("secondary-shift-n");
-        wait_for_binding(&mut vcx, "NewTab", "secondary-shift-n");
+        // A list, because recording a shortcut on the Settings page *sets* it:
+        // the row showed one chord and now shows another. A bare string in
+        // config adds a chord beside the default (#868), which is not what
+        // the person at the row just did.
+        wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["secondary-shift-n"]));
 
         let recording = app.update_in(&mut vcx, |app, _, _| {
             app.active_settings().map(|s| s.recording.is_some())
@@ -10450,7 +10481,30 @@ mod keybinding_gpui_tests {
         begin_capture(&app, &mut vcx, "CloseActiveTab");
         vcx.simulate_keystrokes("secondary-b");
         vcx.simulate_keystrokes("x");
-        wait_for_binding(&mut vcx, "CloseActiveTab", "secondary-b x");
+        wait_for_binding(
+            &mut vcx,
+            "CloseActiveTab",
+            serde_json::json!(["secondary-b x"]),
+        );
+    }
+
+    #[gpui::test]
+    fn recording_a_chord_another_action_also_has_takes_only_that_chord(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
+                "NextTab": ["ctrl-tab", "secondary-alt-n"],
+            }))
+            .expect("the binding loads");
+            crate::ui::keymap::rebind(cx);
+        });
+        begin_capture(&app, &mut vcx, "NewTab");
+        vcx.simulate_keystrokes("secondary-alt-n");
+        wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["secondary-alt-n"]));
+        // Emptying the other action was right when an action had one chord.
+        // With two, it would take Ctrl+Tab away as well, for a keystroke that
+        // was never on it.
+        wait_for_binding(&mut vcx, "NextTab", serde_json::json!(["ctrl-tab"]));
     }
 
     #[gpui::test]
@@ -10458,8 +10512,8 @@ mod keybinding_gpui_tests {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "NewTab");
         vcx.simulate_keystrokes("alt-enter");
-        wait_for_binding(&mut vcx, "NewTab", "alt-enter");
-        wait_for_binding(&mut vcx, "InsertNewline", "");
+        wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["alt-enter"]));
+        wait_for_binding(&mut vcx, "InsertNewline", serde_json::json!([]));
 
         let note = app.update_in(&mut vcx, |app, _, _| {
             app.active_settings().and_then(|s| s.rebinding_note.clone())

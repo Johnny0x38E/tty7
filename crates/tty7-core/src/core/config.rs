@@ -110,6 +110,23 @@ impl serde::Serialize for FontFeatures {
     }
 }
 
+/// One action's line in `keybindings`.
+///
+/// The two shapes mean different things, so a save writes back whichever one
+/// was read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum KeybindingOverride {
+    /// `"NextTab": "cmd-shift-]"` — a chord *beside* the ones the action
+    /// already has, the way VS Code, Zed and kitty read a line like it (#868).
+    /// Empty unbinds the action, which is what `""` has always meant here.
+    Add(String),
+    /// `"NextTab": ["cmd-shift-]"]` — exactly these chords, replacing the
+    /// default and the preset's. `[]` unbinds. This is what the Settings page
+    /// writes, because recording a shortcut there sets it.
+    Exact(Vec<String>),
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
@@ -150,7 +167,7 @@ pub struct Config {
     pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
-    pub keybindings: HashMap<String, String>,
+    pub keybindings: HashMap<String, KeybindingOverride>,
     #[serde(default = "default_preset")]
     pub keybinding_preset: String,
     #[serde(default = "default_prefix")]
@@ -1930,6 +1947,25 @@ mod tests {
         assert_eq!(cfg.font_family, "Hack");
         assert_eq!(cfg.theme_preset, "light");
         assert!(cfg.keybindings.is_empty());
+    }
+
+    #[test]
+    fn keybindings_take_a_chord_or_a_list_and_write_back_what_they_read() {
+        // A string is the shape every config written before #868 has, from the
+        // Settings page and by hand; a list is the one that replaces an
+        // action's chords outright. Both have to load, and a save must not turn
+        // one into the other — the two mean different things.
+        let written = serde_json::json!({
+            "NextTab": "cmd-shift-]",
+            "AlternatePaste": "",
+            "PrevTab": ["cmd-shift-[", "ctrl-shift-tab"],
+            "SplitRight": [],
+        });
+        let cfg: Config =
+            serde_json::from_value(serde_json::json!({ "keybindings": written.clone() }))
+                .expect("both shapes load");
+        assert_eq!(cfg.keybindings.len(), 4);
+        assert_eq!(serde_json::to_value(&cfg.keybindings).unwrap(), written);
     }
 
     fn pin_config_dir() {
