@@ -15119,6 +15119,125 @@ mod gpui_tests {
         );
     }
 
+    /// #844: a TUI that resets DECTCEM and draws its own reverse-video caret
+    /// gets no terminal caret painted over it — focused, unfocused, and after
+    /// a re-attach replays its screen — and `?25h` brings the caret back.
+    ///
+    /// The stream is the reporter's shape: an alternate screen and 69 `?25l`
+    /// interleaved with 75 `?25h`, the last one a hide. What is checked is the
+    /// snapshot a real paint left behind, through the same `painted_cursor`
+    /// the element paints from.
+    #[gpui::test]
+    fn dectcem_reset_paints_no_terminal_caret_over_the_tuis_own(cx: &mut TestAppContext) {
+        use crate::core::config::CursorStyle;
+
+        // An Ink-style frame: our own caret as one reverse-video cell at
+        // row 5 column 13, and the real cursor parked on it.
+        const FRAME: &[u8] = b"\x1b[5;1H\x1b[2K> type here \x1b[7m \x1b[27m\x1b[5;13H";
+        let mut stream = b"\x1b[?1049h".to_vec();
+        stream.extend(std::iter::repeat_n(&b"\x1b[?25h"[..], 7).flatten());
+        for _ in 0..68 {
+            stream.extend_from_slice(b"\x1b[?25l");
+            stream.extend_from_slice(FRAME);
+            stream.extend_from_slice(b"\x1b[?25h");
+        }
+        stream.extend_from_slice(b"\x1b[?25l");
+        stream.extend_from_slice(FRAME);
+        assert_eq!(stream.windows(6).filter(|w| w == b"\x1b[?25l").count(), 69);
+        assert_eq!(stream.windows(6).filter(|w| w == b"\x1b[?25h").count(), 75);
+
+        type Painted = Option<(usize, usize, CursorStyle)>;
+        // Paints frames until the one the pane settles on matches `want`, and
+        // returns the last painted caret either way.
+        let paint_until = |window: &gpui::WindowHandle<TerminalView>,
+                           cx: &mut TestAppContext,
+                           focused: bool,
+                           want: &dyn Fn(Painted) -> bool| {
+            let mut painted = None;
+            for _ in 0..400 {
+                window
+                    .update(cx, |view, window, cx| {
+                        if focused {
+                            window.activate_window();
+                            view.focus_handle.focus(window, cx);
+                        } else {
+                            window.blur();
+                        }
+                        cx.notify();
+                    })
+                    .unwrap();
+                let mut vcx = gpui::VisualTestContext::from_window((*window).into(), cx);
+                vcx.update(|window, _| window.refresh());
+                vcx.run_until_parked();
+                let (text, snap) = window
+                    .update(cx, |view, window, _| {
+                        assert_eq!(view.focus_handle.is_focused(window), focused);
+                        use alacritty_terminal::grid::Dimensions as _;
+                        use alacritty_terminal::index::{Column, Line};
+                        let term = view.terminal.term.lock();
+                        let row = &term.grid()[Line(4)];
+                        let text = (0..term.grid().columns())
+                            .map(|col| row[Column(col)].c)
+                            .collect::<String>();
+                        (text, view.grid_snap.as_ref().map(|s| s.painted_cursor()))
+                    })
+                    .unwrap();
+                if text.starts_with("> type here")
+                    && let Some(p) = snap
+                {
+                    painted = p;
+                    if want(p) {
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            painted
+        };
+
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Output(stream.clone())
+            .encode(&mut daemon)
+            .unwrap();
+        let focused = paint_until(&window, cx, true, &|p| p.is_none());
+        assert_eq!(
+            focused, None,
+            "a focused pane painted its caret over a TUI that reset DECTCEM"
+        );
+        let unfocused = paint_until(&window, cx, false, &|p| p.is_none());
+        assert_eq!(
+            unfocused, None,
+            "an unfocused pane painted its hollow caret over a TUI that reset DECTCEM"
+        );
+
+        DaemonMsg::Output(b"\x1b[?25h".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        let shown = paint_until(&window, cx, true, &|p| p.is_some());
+        assert_eq!(
+            shown.map(|(row, col, _)| (row, col)),
+            Some((4, 12)),
+            "`?25h` must bring the caret back where the program parked it"
+        );
+
+        // Switching back to the tab: a brand new view replays the screen the
+        // daemon kept, then the prompt state, which says a program is running.
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Snapshot(stream).encode(&mut daemon).unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        let replayed = paint_until(&window, cx, true, &|p| p.is_none());
+        assert_eq!(
+            replayed, None,
+            "a re-attached pane painted its caret over a TUI that reset DECTCEM"
+        );
+    }
+
     #[gpui::test]
     fn child_exit_emits_the_close_event_but_disconnect_does_not(cx: &mut TestAppContext) {
         use std::cell::Cell;

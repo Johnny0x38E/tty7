@@ -1625,6 +1625,20 @@ pub(super) struct GridSnapshot {
     history_size: usize,
 }
 
+impl GridSnapshot {
+    /// The terminal caret this frame paints, if any. None while the program
+    /// has the cursor hidden: alacritty reports a DECTCEM-reset cursor
+    /// (`?25l`) as `CursorShape::Hidden`, and a TUI that hides it is usually
+    /// drawing a caret of its own that ours must not cover (#844).
+    pub(super) fn painted_cursor(
+        &self,
+    ) -> Option<(usize, usize, crate::core::config::CursorStyle)> {
+        self.cursor
+            .filter(|c| !c.hidden)
+            .map(|c| (c.row, c.col, c.style))
+    }
+}
+
 impl TerminalElement {
     pub(super) fn build_grid(
         &self,
@@ -2165,9 +2179,7 @@ impl Element for TerminalElement {
         let sliver = snap.sliver.as_ref();
 
         let cursor_cell = cursor.map(|c| (c.row, c.ime_col));
-        let render_cursor = cursor
-            .filter(|c| !c.hidden)
-            .map(|c| (c.row, c.col, c.style));
+        let render_cursor = snap.painted_cursor();
 
         // Reverse-video the block cursor's cell up front, so it rides the
         // normal background-then-glyph path instead of being tinted on top of
