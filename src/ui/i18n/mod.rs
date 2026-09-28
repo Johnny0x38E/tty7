@@ -846,7 +846,7 @@ l10n_keys! {
     SftpTransferCancelled,
     SftpTransferError,
     SftpTransferListFailed,
-    SftpImagePasteUploadFailed,
+    SftpPasteUploadFailed,
     LinkFileOpenFailed,
     ForwardDisconnected,
     ForwardDisconnectedFrom,

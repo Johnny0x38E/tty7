@@ -1142,8 +1142,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferCancelled => "キャンセル済み",
         L10nKey::SftpTransferError => "エラー",
         L10nKey::SftpTransferListFailed => "転送状況を取得できませんでした: {error}",
-        L10nKey::SftpImagePasteUploadFailed => {
-            "貼り付けた画像を {host} にアップロードできませんでした: {error}"
+        L10nKey::SftpPasteUploadFailed => {
+            "{name} を {host} にアップロードできませんでした: {error}"
         }
         L10nKey::LinkFileOpenFailed => "{path} を開けませんでした: {error}",
         L10nKey::ForwardDisconnected => "切断済み",

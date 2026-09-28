@@ -1026,7 +1026,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferCancelled => "已取消",
         L10nKey::SftpTransferError => "错误",
         L10nKey::SftpTransferListFailed => "无法获取传输状态：{error}",
-        L10nKey::SftpImagePasteUploadFailed => "无法将粘贴的图片上传到 {host}：{error}",
+        L10nKey::SftpPasteUploadFailed => "无法将 {name} 上传到 {host}：{error}",
         L10nKey::LinkFileOpenFailed => "无法打开 {path}：{error}",
         L10nKey::ForwardDisconnected => "已断开",
         L10nKey::ForwardDisconnectedFrom => "与 {host} 的连接已断开",

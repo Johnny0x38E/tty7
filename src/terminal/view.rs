@@ -944,21 +944,25 @@ fn trim_trailing_spaces(text: &str) -> String {
         .join("\n")
 }
 
-fn clipboard_paste_text(item: &ClipboardItem, shell: Option<&str>) -> Option<String> {
-    let escaped: Vec<String> = item
-        .entries()
+/// The local files the clipboard carries — a Finder or Explorer Copy on a file
+/// puts its path there, not its bytes.
+fn clipboard_paths(item: &ClipboardItem) -> Vec<std::path::PathBuf> {
+    item.entries()
         .iter()
         .filter_map(|e| match e {
             ClipboardEntry::ExternalPaths(paths) => Some(paths.paths()),
             _ => None,
         })
         .flatten()
-        .map(|p| quote_for_shell(&p.to_string_lossy(), shell))
-        .collect();
-    if !escaped.is_empty() {
-        return Some(escaped.join(" "));
-    }
-    item.text()
+        .cloned()
+        .collect()
+}
+
+/// Paths as one line of shell words, trailing space included so whatever is
+/// typed next starts a word of its own.
+fn pasted_paths_text(paths: &[String], shell: Option<&str>) -> String {
+    let words: Vec<String> = paths.iter().map(|p| quote_for_shell(p, shell)).collect();
+    format!("{} ", words.join(" "))
 }
 
 fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
@@ -1128,29 +1132,177 @@ fn files_cwd(
     }
 }
 
-/// The staged image's path as the pane's own filesystem spells it.
+/// A local path — a staged image, a copied or dropped file — as the pane's own
+/// filesystem spells it.
 ///
 /// A WSL pane shares this machine's disk but not its path syntax: an agent in
 /// there reads `/mnt/c/…` and cannot open `C:\…` at all, which is why the
 /// upload route skips WSL — there is nothing to copy, only a name to rewrite.
 /// A path with no mapping falls back to the Windows one, which at least tells
 /// the user where the file is.
-fn staged_path_for_pane(local: &str, shares_localhost: bool) -> String {
+fn local_path_for_pane(local: &str, shares_localhost: bool) -> String {
     if shares_localhost {
         return wsl_path(local).unwrap_or_else(|| local.to_string());
     }
     local.to_string()
 }
 
-/// Staging images under the SSH user's own home keeps them out of the
+/// Staging pastes under the SSH user's own home keeps them out of the
 /// world-writable `/tmp`, where any local account could pre-create the
-/// directory, read what lands in it, or swap a pasted screenshot for one of
-/// its own before the pane's agent opens it.
+/// directory, read what lands in it, or swap a pasted file for one of its own
+/// before the pane's agent opens it.
 const REMOTE_CLIPBOARD_PATH: [&str; 3] = [".cache", "tty7", "clipboard"];
 
 /// Owner-only, and *only* owner: a staging directory anyone else can enter is
-/// one anyone else can read the pasted screenshots out of.
+/// one anyone else can read the pasted files out of.
 const REMOTE_CLIPBOARD_MODE: u32 = 0o700;
+
+/// How long a paste stays staged on the remote. Long enough to outlive any
+/// conversation that still refers to it; a week of pasted spreadsheets is
+/// what would otherwise pile up in the user's home forever.
+const REMOTE_CLIPBOARD_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// A fresh name for one paste's own directory under the staging directory.
+///
+/// Each paste gets a directory so every file keeps its real name — which is
+/// what the agent reads, and `report.xlsx` says far more than a hash — without
+/// two pastes of the same name overwriting each other.
+fn paste_dir_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    format!("paste-{nanos:x}{n:x}")
+}
+
+/// Whether a staging entry has outlived [`REMOTE_CLIPBOARD_TTL_SECS`]. An
+/// entry with no mtime (`0`) is left alone: its age is unknown, not great.
+fn staged_entry_expired(mtime: u64, now: u64) -> bool {
+    mtime != 0 && now.saturating_sub(mtime) > REMOTE_CLIPBOARD_TTL_SECS
+}
+
+/// Remove the staging directory's expired entries. Best effort: a failure
+/// here costs disk space, never a paste, so nothing is reported.
+fn prune_remote_clipboard_dir(route: &crate::ui::sftp::SftpRoute, dir: &str) {
+    let Ok(entries) = route.list(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for entry in entries {
+        if entry.name == "." || entry.name == ".." || !staged_entry_expired(entry.mtime, now) {
+            continue;
+        }
+        remove_remote_tree(
+            route,
+            &crate::daemon::ssh::sftp::remote_join(dir, &entry.name),
+            entry.kind,
+            0,
+        );
+    }
+}
+
+/// Delete a remote file or directory tree. A symlink is removed as a link and
+/// never followed — the tree is ours, where it points is not.
+fn remove_remote_tree(
+    route: &crate::ui::sftp::SftpRoute,
+    path: &str,
+    kind: crate::daemon::protocol::SftpEntryKind,
+    depth: usize,
+) {
+    use crate::daemon::protocol::{SftpEntryKind, SftpOp};
+    // A pasted folder is as deep as it was on disk; this bounds a pathological
+    // one rather than any real one.
+    const MAX_DEPTH: usize = 64;
+    if kind != SftpEntryKind::Dir {
+        route.op(SftpOp::RemoveFile {
+            path: path.to_string(),
+        });
+        return;
+    }
+    if depth < MAX_DEPTH
+        && let Ok(children) = route.list(path)
+    {
+        for child in children {
+            if child.name == "." || child.name == ".." {
+                continue;
+            }
+            let child_path = crate::daemon::ssh::sftp::remote_join(path, &child.name);
+            remove_remote_tree(route, &child_path, child.kind, depth + 1);
+        }
+    }
+    route.op(SftpOp::RemoveDir {
+        path: path.to_string(),
+    });
+}
+
+/// One local path handed to the remote: where it went and the transfer
+/// carrying it, or why it never left.
+struct PasteUpload {
+    local: std::path::PathBuf,
+    started: Result<StartedUpload, String>,
+}
+
+struct StartedUpload {
+    remote: String,
+    job: u64,
+    is_dir: bool,
+}
+
+/// Start uploading `sources` into a new directory of their own under the
+/// staging directory `dir`. Blocking, like everything that talks to the
+/// daemon, so this runs off the UI thread. `Err` means the paste's directory
+/// could not be made and nothing was started; a source that could not be
+/// started on its own is reported in its own entry.
+fn start_paste_uploads(
+    route: &crate::ui::sftp::SftpRoute,
+    pane_id: u64,
+    dir: &str,
+    sources: &[std::path::PathBuf],
+) -> Result<Vec<PasteUpload>, String> {
+    use crate::daemon::protocol::{SftpOp, SftpOpResult, SftpTransferKind, SftpTransferSpec};
+    let paste_dir = crate::daemon::ssh::sftp::remote_join(dir, &paste_dir_name());
+    if let SftpOpResult::Error(e) = route.op(SftpOp::Mkdir {
+        path: paste_dir.clone(),
+    }) {
+        return Err(e);
+    }
+    Ok(sources
+        .iter()
+        .map(|local| {
+            let started = (|| {
+                let name = local
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .filter(|n| crate::daemon::ssh::sftp::safe_local_name(n))
+                    .ok_or_else(|| format!("{} has no file name", local.display()))?;
+                let is_dir = std::fs::metadata(local)
+                    .map_err(|e| format!("{}: {e}", local.display()))?
+                    .is_dir();
+                let remote = crate::daemon::ssh::sftp::remote_join(&paste_dir, &name);
+                let job = route.transfer_start(SftpTransferSpec {
+                    pane_id,
+                    kind: SftpTransferKind::Upload,
+                    local: local.clone(),
+                    remote: remote.clone(),
+                    recursive: is_dir,
+                })?;
+                Ok(StartedUpload {
+                    remote,
+                    job,
+                    is_dir,
+                })
+            })();
+            PasteUpload {
+                local: local.clone(),
+                started,
+            }
+        })
+        .collect())
+}
 
 /// Whether a prepared staging directory may be uploaded into.
 ///
@@ -3335,7 +3487,12 @@ impl TerminalView {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
-        if let Some(text) = clipboard_paste_text(&item, self.shell_program().as_deref()) {
+        let paths = clipboard_paths(&item);
+        if !paths.is_empty() {
+            self.paste_local_paths(paths, cx);
+            return;
+        }
+        if let Some(text) = item.text() {
             self.paste(text, cx);
             return;
         }
@@ -3351,17 +3508,50 @@ impl TerminalView {
     }
 
     fn drop_files(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
-        let shell = self.shell_program();
-        let text = paths
-            .paths()
-            .iter()
-            .map(|p| quote_for_shell(&p.to_string_lossy(), shell.as_deref()))
-            .collect::<Vec<_>>()
-            .join(" ");
-        if text.is_empty() {
+        self.paste_local_paths(paths.paths().to_vec(), cx);
+    }
+
+    /// A row dragged out of a remote Files tree names a file on that remote,
+    /// not here: there is nothing to upload, and the path is pasted as the
+    /// tree spells it.
+    fn drop_remote_path(
+        &mut self,
+        drag: &crate::ui::file_tree::RemotePathDrag,
+        cx: &mut Context<Self>,
+    ) {
+        let text = pasted_paths_text(
+            &[drag.path.to_string_lossy().into_owned()],
+            self.shell_program().as_deref(),
+        );
+        self.paste(text, cx);
+    }
+
+    /// Paste files that live on this machine so the pane's program can open
+    /// them: uploaded first when the pane runs on an SSH host, renamed for a
+    /// WSL pane, and pasted as they are everywhere else.
+    fn paste_local_paths(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
             return;
         }
-        self.paste(format!("{text} "), cx);
+        // Every step of an upload is a blocking daemon round trip, which a
+        // keystroke handler must not make, so a remote pane pastes from a
+        // background task and this returns without touching the line.
+        if self.upload_for_remote(paths.clone(), cx) {
+            return;
+        }
+        // The upload declined: a local pane, a WSL pane, which needs a rewrite
+        // rather than a transfer, or a workspace with no SSH spec to
+        // piggyback on.
+        let shares_localhost = self
+            .workspace
+            .as_ref()
+            .is_some_and(|w| w.shares_localhost());
+        let spelled: Vec<String> = paths
+            .iter()
+            .map(|p| local_path_for_pane(&p.to_string_lossy(), shares_localhost))
+            .collect();
+        let text = pasted_paths_text(&spelled, self.shell_program().as_deref());
+        self.paste(text, cx);
     }
 
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
@@ -3385,66 +3575,52 @@ impl TerminalView {
         let Some(path) = write_clipboard_image(img) else {
             return false;
         };
-        // SSH panes can't see the local temp file, so the image is uploaded and
-        // the *remote* path pasted instead. Every step of that needs a blocking
-        // daemon round trip, which a keystroke handler must not do, so the
-        // remote pane pastes from a background task and this returns without
-        // touching the line.
-        if self.upload_image_for_remote(&path, cx) {
-            return true;
-        }
-        // The upload declined: a WSL pane, which needs a rewrite rather than a
-        // transfer, or a workspace with no SSH spec to piggyback on. A macOS
-        // pane only reaches this line when it is remote — a local one returned
-        // above — so pasting the path is right on every platform, and staying
-        // silent here would be the very no-op this route exists to avoid.
-        let shares_localhost = self
-            .workspace
-            .as_ref()
-            .is_some_and(|w| w.shares_localhost());
-        let path = staged_path_for_pane(&path.to_string_lossy(), shares_localhost);
-        let text = quote_for_shell(&path, self.shell_program().as_deref());
-        self.paste(format!("{text} "), cx);
+        // A macOS pane only gets here when it is remote — a local one returned
+        // above — so pasting a path is right on every platform, and staying
+        // silent would be the very no-op this route exists to avoid.
+        self.paste_local_paths(vec![path], cx);
         true
     }
 
-    /// Upload a locally staged clipboard image to the pane's remote host and
-    /// paste the remote path, all off the UI thread. Answers whether this pane
-    /// took the paste over; `false` means a local, WSL, or spec-less pane the
-    /// caller should paste the local path for.
+    /// Upload local files to the pane's remote host and paste their remote
+    /// paths, all off the UI thread. Answers whether this pane took the paste
+    /// over; `false` means a local, WSL, or spec-less pane the caller should
+    /// paste the local paths for.
     ///
-    /// The upload itself still outlives the paste — it has to, or Ctrl+V would
-    /// stall on the wire — so the job is watched to completion and a failure
-    /// at any point warns the user that the path they were handed is dangling.
-    fn upload_image_for_remote(&mut self, local: &std::path::Path, cx: &mut Context<Self>) -> bool {
-        use crate::daemon::protocol::{SftpTransferKind, SftpTransferSpec};
+    /// The paste lands as soon as the transfers start — Ctrl+V must not stall
+    /// on the wire — and each file appears at its path only once it is whole,
+    /// since the upload writes a temporary name and renames it into place. The
+    /// transfers are watched to the end, and a failure warns the user that the
+    /// path they were handed is dangling.
+    fn upload_for_remote(
+        &mut self,
+        sources: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(spec) = remote_paste_spec(self.workspace.as_ref(), self.ssh_spec.as_deref())
         else {
             return false;
         };
         let host = format!("{}@{}", spec.user, spec.host);
-        // The only caller stages through `write_clipboard_image`, so this
-        // holds; a name that could not stand alone as a remote path component
-        // would be a bug worth failing on rather than joining blindly.
-        let name = local
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| crate::daemon::ssh::sftp::safe_local_name(n));
-        let Some(name) = name else {
-            log::warn!("refusing to upload a clipboard image named {local:?}");
-            return false;
-        };
         let route = crate::ui::sftp::SftpRoute::new(self.pane_id, self.workspace.clone());
         let cached = self.remote_clipboard_dir.clone();
-        let local = local.to_path_buf();
         let pane_id = self.pane_id;
         cx.spawn(async move |this, cx| {
             let prepared = match cached {
                 Some(dir) => Ok(dir),
                 None => {
                     let route = route.clone();
-                    cx.background_spawn(async move { prepare_remote_clipboard_dir(&route) })
-                        .await
+                    cx.background_spawn(async move {
+                        let prepared = prepare_remote_clipboard_dir(&route);
+                        // Only on the pane's first paste, which is the only
+                        // time the directory is prepared: one listing, cheap
+                        // next to the upload that follows it.
+                        if let Ok(dir) = &prepared {
+                            prune_remote_clipboard_dir(&route, dir);
+                        }
+                        prepared
+                    })
+                    .await
                 }
             };
             let dir = match this.update(cx, |view, _| {
@@ -3454,65 +3630,78 @@ impl TerminalView {
                 Ok(Some(dir)) => dir,
                 Ok(None) => {
                     let reason = prepared.unwrap_or_else(|e| e);
-                    Self::paste_local_image_path(&this, cx, &local, &host, &reason);
+                    Self::paste_local_fallback(&this, cx, &sources, &host, &reason);
                     return;
                 }
                 Err(_) => return,
             };
-            let remote = crate::daemon::ssh::sftp::remote_join(&dir, &name);
             let started = {
-                let (route, remote, local) = (route.clone(), remote.clone(), local.clone());
-                cx.background_spawn(async move {
-                    route.transfer_start(SftpTransferSpec {
-                        pane_id,
-                        kind: SftpTransferKind::Upload,
-                        local,
-                        remote,
-                        recursive: false,
-                    })
-                })
+                let (route, sources) = (route.clone(), sources.clone());
+                cx.background_spawn(
+                    async move { start_paste_uploads(&route, pane_id, &dir, &sources) },
+                )
                 .await
             };
-            let job = match started {
-                Ok(job) => job,
+            let uploads = match started {
+                Ok(uploads) => uploads,
                 Err(reason) => {
-                    Self::paste_local_image_path(&this, cx, &local, &host, &reason);
+                    Self::paste_local_fallback(&this, cx, &sources, &host, &reason);
                     return;
                 }
             };
-            if this
-                .update(cx, |view, cx| {
-                    let text = quote_for_shell(&remote, view.shell_program().as_deref());
-                    view.paste(format!("{text} "), cx)
+            // A source that never left is pasted by its local path, so the
+            // line still says which file was meant.
+            let spelled: Vec<String> = uploads
+                .iter()
+                .map(|u| match &u.started {
+                    Ok(s) => s.remote.clone(),
+                    Err(_) => u.local.to_string_lossy().into_owned(),
                 })
-                .is_err()
-            {
+                .collect();
+            let pasted = this.update_in(cx, |view, window, cx| {
+                let text = pasted_paths_text(&spelled, view.shell_program().as_deref());
+                view.paste(text, cx);
+                for u in &uploads {
+                    if let Err(reason) = &u.started {
+                        view.warn_paste_upload_failed(&u.local, &host, reason, window, cx);
+                    }
+                }
+            });
+            if pasted.is_err() {
                 return;
             }
-            if let Err(reason) = Self::watch_upload(route, job, &remote, cx).await {
-                let _ = this.update_in(cx, |view, window, cx| {
-                    view.warn_image_upload_failed(&host, &reason, window, cx);
-                });
+            for u in uploads {
+                let Ok(started) = u.started else { continue };
+                if let Err(reason) = Self::watch_upload(route.clone(), &started, cx).await {
+                    let _ = this.update_in(cx, |view, window, cx| {
+                        view.warn_paste_upload_failed(&u.local, &host, &reason, window, cx);
+                    });
+                }
             }
         })
         .detach();
         true
     }
 
-    /// Fall back to the local path when the remote staging directory cannot be
-    /// prepared — the paste is never dropped — and say why it is local.
-    fn paste_local_image_path(
+    /// Fall back to the local paths when nothing could be staged on the remote
+    /// — the paste is never dropped — and say why they are local.
+    fn paste_local_fallback(
         this: &gpui::WeakEntity<Self>,
         cx: &mut gpui::AsyncApp,
-        local: &std::path::Path,
+        sources: &[std::path::PathBuf],
         host: &str,
         reason: &str,
     ) {
-        let local = local.to_string_lossy().into_owned();
+        let spelled: Vec<String> = sources
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         let _ = this.update_in(cx, |view, window, cx| {
-            let text = quote_for_shell(&local, view.shell_program().as_deref());
-            view.paste(format!("{text} "), cx);
-            view.warn_image_upload_failed(host, reason, window, cx);
+            let text = pasted_paths_text(&spelled, view.shell_program().as_deref());
+            view.paste(text, cx);
+            if let Some(first) = sources.first() {
+                view.warn_paste_upload_failed(first, host, reason, window, cx);
+            }
         });
     }
 
@@ -3522,16 +3711,18 @@ impl TerminalView {
     /// watching would otherwise fail in silence.
     async fn watch_upload(
         route: crate::ui::sftp::SftpRoute,
-        job: u64,
-        remote: &str,
+        upload: &StartedUpload,
         cx: &mut gpui::AsyncApp,
     ) -> Result<(), String> {
         use crate::daemon::protocol::{SftpJobState, SftpOp};
-        // Long enough for a screenshot over a slow link, bounded so a wedged
-        // job cannot poll forever.
         const POLL: std::time::Duration = std::time::Duration::from_millis(500);
-        const POLLS: usize = 600;
-        for _ in 0..POLLS {
+        // A pasted file can be any size, so there is no deadline on the whole
+        // transfer — only on one that has stopped moving, which is wedged
+        // rather than slow.
+        const STALLED_POLLS: usize = 600;
+        let mut last_done = 0;
+        let mut still = 0;
+        while still < STALLED_POLLS {
             cx.background_executor().timer(POLL).await;
             let listed = {
                 let route = route.clone();
@@ -3540,22 +3731,37 @@ impl TerminalView {
             };
             // A poll that failed says nothing about the job — keep asking
             // until it answers or the budget above runs out.
-            let Ok(listed) = listed else { continue };
-            let Some(progress) = listed.into_iter().find(|j| j.job_id == job) else {
+            let Ok(listed) = listed else {
+                still += 1;
+                continue;
+            };
+            let Some(progress) = listed.into_iter().find(|j| j.job_id == upload.job) else {
                 // Pruned after the retention window, or the daemon restarted:
                 // there is nothing left to report either way.
                 return Ok(());
             };
             match progress.state {
-                SftpJobState::Running => continue,
+                SftpJobState::Running => {
+                    still = if progress.bytes_done == last_done {
+                        still + 1
+                    } else {
+                        0
+                    };
+                    last_done = progress.bytes_done;
+                }
                 SftpJobState::Done => {
                     // The staging directory is already owner-only, so this is
-                    // belt and braces against a wider umask on the remote.
-                    let (route, path) = (route.clone(), remote.to_string());
-                    cx.background_spawn(
-                        async move { route.op(SftpOp::Chmod { path, mode: 0o600 }) },
-                    )
-                    .await;
+                    // belt and braces against a wider umask on the remote. A
+                    // folder is left as it was: its contents are behind the
+                    // same owner-only directory, and its own layout is the
+                    // user's.
+                    if !upload.is_dir {
+                        let (route, path) = (route.clone(), upload.remote.clone());
+                        cx.background_spawn(async move {
+                            route.op(SftpOp::Chmod { path, mode: 0o600 })
+                        })
+                        .await;
+                    }
                     return Ok(());
                 }
                 SftpJobState::Cancelled => return Ok(()),
@@ -3567,26 +3773,33 @@ impl TerminalView {
         Ok(())
     }
 
-    /// One notification per failed paste — the pane's line already has a path
+    /// One notification per failed file — the pane's line already has a path
     /// in it, and the user is the only one who can tell whether it matters.
-    fn warn_image_upload_failed(
+    fn warn_paste_upload_failed(
         &self,
+        local: &std::path::Path,
         host: &str,
         reason: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        log::warn!("clipboard image upload to {host} failed: {reason}");
+        log::warn!(
+            "pasted upload of {} to {host} failed: {reason}",
+            local.display()
+        );
+        let name = local
+            .file_name()
+            .map_or_else(|| local.to_string_lossy(), |n| n.to_string_lossy());
         window.push_notification(
             crate::ui::i18n::t_fmt(
-                crate::ui::i18n::L10nKey::SftpImagePasteUploadFailed,
-                &[("host", host), ("error", reason)],
+                crate::ui::i18n::L10nKey::SftpPasteUploadFailed,
+                &[("name", &name), ("host", host), ("error", reason)],
             ),
             cx,
         );
     }
 
-    /// Same shape as `warn_image_upload_failed`: one toast per failed open, so
+    /// Same shape as `warn_paste_upload_failed`: one toast per failed open, so
     /// a broken `link_file_command` surfaces as a config problem instead of a
     /// "dead link" (#542). Spawn is all that is reported — a spawned opener
     /// that exits non-zero is nobody's to see.
@@ -7272,6 +7485,15 @@ impl Render for TerminalView {
                 window.focus(&this.focus_handle, cx);
                 this.drop_files(paths, cx);
             }))
+            .drag_over::<crate::ui::file_tree::RemotePathDrag>(|s, _, _, cx| {
+                s.bg(cx.theme().drag_border.opacity(0.12))
+            })
+            .on_drop(cx.listener(
+                |this, drag: &crate::ui::file_tree::RemotePathDrag, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                    this.drop_remote_path(drag, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &CopyText, _w, cx| {
                 this.copy_contextual(false, cx);
             }))
@@ -8357,13 +8579,12 @@ mod tests {
     }
     use super::{
         COMPLETION_MENU_MAX_W, LoopbackPlan, PortRoute, RawInput, SelectEndCopy, Typeahead,
-        WheelRoute, clipboard_paste_text, compose_notification_title, cwd_is_on_host,
-        display_width, link_path_style, loopback_plan, observe_typeahead_for_owner,
-        typeahead_boundary,
+        WheelRoute, clipboard_paths, compose_notification_title, cwd_is_on_host, display_width,
+        link_path_style, loopback_plan, observe_typeahead_for_owner, typeahead_boundary,
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
-        TitleSettle, files_cwd, remote_paste_spec, settle_title, staged_path_for_pane,
+        TitleSettle, files_cwd, local_path_for_pane, remote_paste_spec, settle_title,
         stages_clipboard_image, staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro,
         wsl_share_path,
     };
@@ -8847,7 +9068,7 @@ mod tests {
         // The staged file really is on the pane's own disk — only its name
         // differs — so this is a rewrite, not an upload.
         assert_eq!(
-            staged_path_for_pane(
+            local_path_for_pane(
                 r"C:\Users\me\AppData\Local\Temp\tty7-clipboard\paste-1.png",
                 true
             ),
@@ -8858,17 +9079,17 @@ mod tests {
         // No automount mapping: the Windows path at least says where it went.
         let unc = r"\\server\share\paste-1.png";
         assert_eq!(wsl_path(unc), None);
-        assert_eq!(staged_path_for_pane(unc, true), unc);
+        assert_eq!(local_path_for_pane(unc, true), unc);
         // Drive-relative, not absolute — `C:x` means "x under C:'s cwd".
         assert_eq!(wsl_path(r"C:paste-1.png"), None);
 
         // Every other pane keeps the path exactly as staged.
         assert_eq!(
-            staged_path_for_pane("/tmp/tty7-clipboard/paste-1.png", false),
+            local_path_for_pane("/tmp/tty7-clipboard/paste-1.png", false),
             "/tmp/tty7-clipboard/paste-1.png"
         );
         assert_eq!(
-            staged_path_for_pane(r"C:\Temp\paste-1.png", false),
+            local_path_for_pane(r"C:\Temp\paste-1.png", false),
             r"C:\Temp\paste-1.png"
         );
     }
@@ -9658,7 +9879,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_paste_text_quotes_and_space_joins_files() {
+    fn a_copied_file_is_pasted_by_path_quoted_and_space_joined() {
         let item = ClipboardItem {
             entries: vec![ClipboardEntry::ExternalPaths(ExternalPaths(
                 vec![
@@ -9668,16 +9889,49 @@ mod tests {
                 .into(),
             ))],
         };
+        let paths = clipboard_paths(&item);
         assert_eq!(
-            clipboard_paste_text(&item, Some("zsh")).as_deref(),
-            Some("'/Users/me/My File.txt' /tmp/b.log")
+            paths,
+            [
+                PathBuf::from("/Users/me/My File.txt"),
+                PathBuf::from("/tmp/b.log")
+            ]
+        );
+        let spelled: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            super::pasted_paths_text(&spelled, Some("zsh")),
+            "'/Users/me/My File.txt' /tmp/b.log "
         );
 
+        // Text is text: nothing on the clipboard names a file.
         let text = ClipboardItem::new_string("echo hi".to_string());
-        assert_eq!(
-            clipboard_paste_text(&text, Some("zsh")).as_deref(),
-            Some("echo hi")
-        );
+        assert!(clipboard_paths(&text).is_empty());
+    }
+
+    /// Two pastes of `report.xlsx` in the same instant must not land in the
+    /// same directory, or the second overwrites the file the first pasted.
+    #[test]
+    fn every_paste_stages_into_a_directory_of_its_own() {
+        let a = super::paste_dir_name();
+        let b = super::paste_dir_name();
+        assert_ne!(a, b);
+        assert!(crate::daemon::ssh::sftp::safe_local_name(&a));
+    }
+
+    #[test]
+    fn staged_pastes_expire_after_a_week_and_never_on_an_unknown_age() {
+        let now = 1_800_000_000;
+        let week = super::REMOTE_CLIPBOARD_TTL_SECS;
+        assert!(!super::staged_entry_expired(now - 60, now));
+        assert!(!super::staged_entry_expired(now - week, now));
+        assert!(super::staged_entry_expired(now - week - 1, now));
+        // No mtime from the server says nothing about age.
+        assert!(!super::staged_entry_expired(0, now));
+        // A remote clock ahead of ours is young, not negative.
+        assert!(!super::staged_entry_expired(now + 3600, now));
     }
 
     #[test]
