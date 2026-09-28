@@ -17,6 +17,7 @@ use crate::core::actions::{
     SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6,
     SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitDown, SplitRight,
 };
+use crate::core::cli_agent::CLIAgent;
 use crate::core::config::{Config, RightPanelTab};
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
@@ -718,6 +719,14 @@ const MENU_HOSTS: usize = 6;
 /// by frecency. Everything else is one row away, in the search.
 const MENU_SHELLS: usize = 3;
 
+/// How many agents the New Tab menu names.
+///
+/// The same cap as [`MENU_SHELLS`], and for the same reason: the agents
+/// someone actually runs are two or three, and a menu is not a search field.
+/// Only agents that have been run are named — there is no "default agent" to
+/// lead the way shells' default does. Everything else is one row away.
+const MENU_AGENTS: usize = 3;
+
 /// The Search Everywhere button in the middle of the title bar: the width of
 /// a field that reads as one, and the 28px of the rail's own search.
 const TITLEBAR_SEARCH_W: f32 = 360.;
@@ -728,14 +737,15 @@ const MENU_W: Pixels = px(360.);
 
 /// How tall, before it starts scrolling.
 ///
-/// Both lists are capped — [`MENU_SHELLS`] shells and [`MENU_HOSTS`] hosts —
-/// so the menu's full hand is a fixed number of rows: those, both headings, the
-/// row closing each section and the modifier hint, at the 26px a row occupies.
-/// This leaves room above that for a seam row or two more, so the full hand
-/// always arrives whole and never scrolls on its own. It is capped again
-/// against the window in [`NewTabMenu::build`], since a menu taller than what
-/// it hangs off is worse than one that scrolls.
-const MENU_H: Pixels = px(560.);
+/// The lists are capped — [`MENU_SHELLS`] shells, [`MENU_AGENTS`] agents and
+/// [`MENU_HOSTS`] hosts — so the menu's full hand is a fixed number of rows:
+/// those, the three headings, the row closing each section, the separators and
+/// the modifier hint, at the 26px a row occupies. The Agents section is absent
+/// when nothing is offered, and this still leaves room above the full hand for
+/// a seam row or two more, so it always arrives whole and never scrolls on its
+/// own. It is capped again against the window in [`NewTabMenu::build`], since
+/// a menu taller than what it hangs off is worse than one that scrolls.
+const MENU_H: Pixels = px(720.);
 
 /// What the row closing the Local section types into the search's Terminals
 /// tab for you.
@@ -755,6 +765,14 @@ const MENU_H: Pixels = px(560.);
 /// ([`L10nKey::AppCmdShellTitle`], the same word in every language we ship),
 /// so this lands on exactly the shells, default first and then by frecency.
 const SEARCH_SHELL_QUERY: &str = "shell";
+
+/// What the row closing the Agents section types into the search's Terminals
+/// tab.
+///
+/// The same seam as [`SEARCH_SHELL_QUERY`]. Every quick-launch row is titled
+/// `Agent: {name}` ([`L10nKey::AppCmdAgentLaunchTitle`], the same word in every
+/// language), so this lands on exactly the agents.
+const SEARCH_AGENT_QUERY: &str = "agent";
 
 /// How this platform spells the key that turns a New Tab row into a split.
 fn split_modifier() -> &'static str {
@@ -783,6 +801,13 @@ struct NewTabMenu {
     /// Saved host, its display name, and the `user@host:port` beside it —
     /// empty when the name already says it.
     hosts: Vec<(uuid::Uuid, SharedString, SharedString)>,
+    /// Agents the menu names — at most [`MENU_AGENTS`], and only ones that
+    /// have actually been run.
+    agents: Vec<CLIAgent>,
+    /// The window can offer agents the menu does not name, so the section
+    /// closes with a row into the palette. Also the reason the section exists
+    /// when nothing has been run yet: the installed agents are all in there.
+    more_agents: bool,
 }
 
 impl NewTabMenu {
@@ -906,6 +931,44 @@ impl NewTabMenu {
             }
         }));
 
+        // A peer of Local and SSH, and absent when this machine has no agent
+        // to offer — an empty heading would be a section about nothing. The
+        // rows are the ones actually run; the seam holds the rest, already
+        // filtered, the way Other Shells does.
+        if !self.agents.is_empty() || self.more_agents {
+            menu = menu
+                .item(PopupMenuItem::separator())
+                .item(PopupMenuItem::label(t(L10nKey::CmdGroupAgents)));
+            for agent in self.agents.iter().copied() {
+                let app = self.app.clone();
+                menu = menu.item(PopupMenuItem::new(agent.display_name()).on_click(
+                    move |_, window, cx| {
+                        let at = SpawnWhere::from_modifiers(window.modifiers());
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |this, cx| this.launch_agent(agent, at, window, cx));
+                        }
+                    },
+                ));
+            }
+            if self.more_agents {
+                let app = self.app.clone();
+                menu = menu.item(PopupMenuItem::new(t(L10nKey::TabMenuOtherAgents)).on_click(
+                    move |_, window, cx| {
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |this, cx| {
+                                this.open_search(
+                                    SearchTab::Terminals,
+                                    SEARCH_AGENT_QUERY,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        }
+                    },
+                ));
+            }
+        }
+
         // The one place ⌥ is spelled out. Nothing else in the app teaches it,
         // and a modifier nobody is told about is a feature nobody has. No rule
         // above it: a separator divides two lists of things to pick, and this
@@ -963,6 +1026,27 @@ fn menu_shells<'a>(
             *i == 0 || s.label == default || usage.get(&s.label).is_some_and(|u| u.score(now) > 0.0)
         })
         .map(|(_, s)| *s)
+        .collect()
+}
+
+/// The agents the menu names, off the front of the frecency-ordered list
+/// quick launch already built: only those that have actually been run, at
+/// most [`MENU_AGENTS`].
+///
+/// An agent nobody has run is not named just because it is installed and
+/// there is room. A zero count is not a use either — launching stamps
+/// recency before the pane reports the agent, and the count is what says it
+/// really ran. `offered` is already most-used-first; this does not reorder.
+fn menu_agents(
+    offered: &[CLIAgent],
+    usage: &std::collections::HashMap<String, crate::core::config::ProfileUsage>,
+    now: u64,
+) -> Vec<CLIAgent> {
+    offered
+        .iter()
+        .copied()
+        .filter(|agent| usage.get(agent.slug()).is_some_and(|u| u.score(now) > 0.0))
+        .take(MENU_AGENTS)
         .collect()
 }
 
@@ -1731,6 +1815,8 @@ impl Tty7App {
         let now = crate::core::config::unix_now();
         let sorted = shells_by_frecency(&self.shells.shells, &default_shell, usage, now);
         let shells = menu_shells(&sorted, &default_shell, usage, now);
+        let offered = self.offered_agents(cx);
+        let agents = menu_agents(&offered, &cx.global::<Config>().agent_frecency, now);
         NewTabMenu {
             app,
             more_shells: shells.len() < sorted.len(),
@@ -1740,6 +1826,8 @@ impl Tty7App {
                 .collect(),
             default_shell: SharedString::from(default_shell),
             hosts: menu_hosts(crate::ui::ssh_connect::ssh_profiles_by_frecency(cx)),
+            more_agents: agents.len() < offered.len(),
+            agents,
         }
     }
 
@@ -3818,5 +3906,51 @@ mod tests {
             !more(&[], &[]),
             "no inventory: the fallback row, nothing more"
         );
+    }
+
+    #[test]
+    fn the_new_tab_menu_names_agents_that_have_actually_been_run() {
+        use crate::core::cli_agent::CLIAgent;
+        let now = 100_000_000u64;
+        let day = 86_400u64;
+        // Already most-used-first, the way `offered_agents` hands them over,
+        // except Amp has never been run and sits between two that have — the
+        // filter has to skip it rather than stop.
+        let offered = [
+            CLIAgent::Claude,
+            CLIAgent::Amp,
+            CLIAgent::Codex,
+            CLIAgent::Gemini,
+            CLIAgent::Aider,
+        ];
+        let usage = used(&[
+            ("claude", 12, now - 2 * day),
+            ("codex", 3, now - day),
+            ("gemini", 1, now - 30 * day),
+            ("aider", 0, now),
+        ]);
+        let named = menu_agents(&offered, &usage, now);
+        assert_eq!(
+            named,
+            vec![CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Gemini],
+            "three that have run fill the cap; a zero count is not a use, and a gap is skipped"
+        );
+        assert!(named.len() < offered.len(), "the rest are the seam row's");
+
+        let none = used(&[]);
+        let named = menu_agents(&offered, &none, now);
+        assert!(named.is_empty(), "installed but never run is not named");
+        assert!(
+            named.len() < offered.len(),
+            "so the section is only the seam"
+        );
+        assert!(menu_agents(&[], &usage, now).is_empty());
+
+        // Every offered agent has been run and they fit: no seam row.
+        let few = [CLIAgent::Claude, CLIAgent::Codex];
+        let two = used(&[("claude", 4, now), ("codex", 1, now)]);
+        let named = menu_agents(&few, &two, now);
+        assert_eq!(named, vec![CLIAgent::Claude, CLIAgent::Codex]);
+        assert_eq!(named.len(), few.len());
     }
 }

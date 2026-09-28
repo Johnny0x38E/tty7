@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The New Tab menu names the agents you actually run** (#955). Beside Local
+  and SSH, an Agents section lists up to three agents that have been launched
+  or seen running, most-used first — the same short list the shells get. A row
+  opens that agent in a new tab (hold ⌥ to split) and types its `agent_launch`
+  command, or the bare binary when none is set. Agents that are installed but
+  not in those rows are one click away: **Other Agents…** opens Search
+  Everywhere already filtered to `agent`. The section is absent when this
+  machine has no agent to offer. **New Agent Tab** (⌘⇧A) is unchanged: it
+  still starts the one used last.
+
 - **Find in files, in the right panel's new Search tab.** Type and the active
   tab's project — the same roots the Files tab shows — is searched as you go,
   with hits grouped by file, a count per file, and each match highlighted in

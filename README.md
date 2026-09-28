@@ -108,7 +108,8 @@ None of them are wrapped or proxied — the agent you start is the agent you get
 in a normal PTY, with its own interface. An agent launched through a wrapper
 script can be mapped to one by name with `agent_commands` in `config.json`.
 Every agent on your `PATH` is also a row in Search Everywhere (**Agent: Claude Code**, …)
-that opens it in a new tab; `agent_launch` sets the command line it starts with.
+that opens it in a new tab, and the New Tab menu names the ones you have actually
+run. `agent_launch` sets the command line it starts with.
 
 ## Documentation
 

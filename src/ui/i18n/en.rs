@@ -2032,6 +2032,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabMenuAddHost => "Add SSH Host…",
         L10nKey::TabMenuAllHosts => "All SSH Hosts…",
         L10nKey::TabMenuOtherShells => "Other Shells…",
+        L10nKey::TabMenuOtherAgents => "Other Agents…",
         L10nKey::TabMenuSplitHint => "Hold {key} to split",
         L10nKey::TabUnnamedShell => "Shell {n}",
         L10nKey::ShellDefault => "default",

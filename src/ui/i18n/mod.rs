@@ -1208,6 +1208,7 @@ l10n_keys! {
     TabMenuAddHost,
     TabMenuAllHosts,
     TabMenuOtherShells,
+    TabMenuOtherAgents,
     TabMenuSplitHint,
     TabUnnamedShell,
     ShellDefault,
