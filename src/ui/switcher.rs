@@ -2684,11 +2684,15 @@ impl Tty7App {
             )
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .text_size(gpui::rems(13. / 16.))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(fg)
                     .child(t(L10nKey::AppMenuNewWorkspace)),
-            );
+            )
+            .child(div().pr(px(6.)).child(keycap("esc", cx)));
 
         let label_col = |text: &'static str| {
             div()
@@ -2698,6 +2702,9 @@ impl Tty7App {
                 .text_color(muted)
                 .child(text)
         };
+        // The other cards' well — no outline, the faint fill is the shape —
+        // so this form and the worktree prompt draw a field the same way.
+        let well = crate::ui::dialog::well_fill(cx);
         let field = |inner: gpui::Div| {
             inner
                 .flex_1()
@@ -2705,10 +2712,9 @@ impl Tty7App {
                 .items_center()
                 .gap(px(6.))
                 .px(px(8.))
-                .h(px(30.))
+                .h(px(crate::ui::dialog::FIELD_H))
                 .rounded(crate::ui::rounding::ROW_RADIUS)
-                .border_1()
-                .border_color(border)
+                .bg(well)
         };
 
         let name_row = h_flex()
@@ -2743,7 +2749,7 @@ impl Tty7App {
             false => field(h_flex())
                 .id("switcher-form-host")
                 .cursor_pointer()
-                .hover(move |r| r.bg(hover))
+                .hover(move |r| r.bg(picked_bg))
                 .child(host_glyph(chosen_local, chosen_dot))
                 .child(
                     div()
@@ -2868,7 +2874,7 @@ impl Tty7App {
             .gap(px(8.))
             .child(
                 label_col(t(L10nKey::SwitcherFormHost))
-                    .h(px(30.))
+                    .h(px(crate::ui::dialog::FIELD_H))
                     .flex()
                     .items_center(),
             )
@@ -2876,8 +2882,8 @@ impl Tty7App {
 
         let footer = h_flex()
             .items_center()
-            .px(px(12.))
-            .py(px(8.))
+            .h(px(crate::ui::dialog::FOOTER_H))
+            .px(px(crate::ui::dialog::INSET))
             .border_t_1()
             .border_color(border)
             .text_size(gpui::rems(11. / 16.))
@@ -2890,11 +2896,14 @@ impl Tty7App {
         v_flex()
             .w(px(card_w))
             .map(|panel| crate::ui::theme::floating_surface(panel, cx))
+            .rounded(px(CARD_RADIUS))
             .overflow_hidden()
             .child(header)
             .child(
                 v_flex()
-                    .p(px(12.))
+                    .px(px(crate::ui::dialog::INSET))
+                    .pt(px(16.))
+                    .pb(px(18.))
                     .gap(px(10.))
                     .child(name_row)
                     .child(host_row),

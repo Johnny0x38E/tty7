@@ -420,11 +420,14 @@ impl Theme {
             sidebar,
             rail,
             popover: self.surface(m.popover),
+            // The v5 scrim: a dim, not a blackout. Dark lands on near-black at
+            // 45%; light on a warm near-black at 14%, just enough to say the
+            // window is waiting without turning the page grey.
             scrim: Scrim {
-                ink: mix(m.background, 0x000000, 0.82),
+                ink: mix(m.background, 0x000000, 0.92),
                 alpha: match self.dark {
-                    true => 0.55,
-                    false => 0.30,
+                    true => 0.45,
+                    false => 0.14,
                 },
             },
         }

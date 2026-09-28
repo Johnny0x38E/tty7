@@ -12,15 +12,17 @@
 //! buttons, so the same app had two ideas of what a dialog looks like, and
 //! which one you got depended on which question it was.
 //!
-//! So all three platforms use this. It is laid out like the other cards, sits
-//! where they sit, wraps its text, and answers Return and Escape the way the
-//! native dialogs did — which the call sites were written against.
+//! So all three platforms use this. It is the other cards' surface, corner,
+//! scrim and buttons in v5's alert shape — title and detail as one paragraph,
+//! answers beneath, no header row — wraps its text, and answers Return and
+//! Escape the way the native dialogs did, which the call sites were written
+//! against.
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, PromptButton, PromptHandle, PromptLevel,
     PromptResponse, RenderablePromptHandle, Window, div, prelude::*, px, rems,
 };
-use gpui_component::{ActiveTheme as _, h_flex};
+use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::ui::dialog::{self, Tone};
 use crate::ui::right_panel::{TAB_TEXT, TEXT};
@@ -43,9 +45,12 @@ fn build(
     handle.with_view(prompt, window, cx)
 }
 
-/// A confirmation card is a sentence and two buttons; the worktree form, with
-/// three fields, is 440.
-const WIDTH: f32 = 420.;
+/// A confirmation card is a sentence and two buttons — v5's alert width. The
+/// worktree form, with three fields, is 440.
+const ALERT_W: f32 = 360.;
+
+/// How far down the alert sits, at most.
+const ALERT_TOP: f32 = 180.;
 
 pub(crate) struct TextPrompt {
     message: String,
@@ -131,13 +136,10 @@ impl Focusable for TextPrompt {
 }
 
 impl Render for TextPrompt {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
-        let border = theme.border;
         let rungs = dialog::popover_rungs(cx);
-        let escapable = self.cancel_answer().is_some();
-        let has_detail = self.detail.is_some();
 
         // Answer 0 goes rightmost, where the native dialogs put it and where
         // `confirm_answers` expects it to land.
@@ -162,47 +164,48 @@ impl Render for TextPrompt {
             }
         }
 
-        // The other cards' title row, except that the title wraps: theirs are
-        // names, which truncate cleanly, and this one is a question, which
-        // cut short no longer asks anything. One line still sits in the
-        // 48px row exactly where theirs does.
-        let title = h_flex()
-            .flex_none()
-            .items_center()
-            .gap(px(10.))
-            .min_h(px(dialog::HEADER_H))
-            .py(px(12.))
-            .pl(px(dialog::INSET))
-            .pr(px(14.))
-            .when(has_detail, |row| row.border_b_1().border_color(border))
+        // The v5 confirm card: no title row and no footer rule — a question
+        // is one thought, not a form, so it is set as a paragraph with its
+        // answers under it. The title wraps: cut short, a question no longer
+        // asks anything.
+        let text = v_flex()
+            .gap(px(4.))
+            .min_w_0()
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .text_size(rems(TEXT))
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .line_height(rems(TEXT * 1.4))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(self.message.clone()),
             )
-            .when(escapable, |row| row.child(dialog::keycap("esc", cx)));
-
-        let card = dialog::card(WIDTH, cx)
-            .max_w(gpui::relative(0.9))
-            .child(title)
             .children(self.detail.clone().map(|detail| {
-                dialog::body().child(
-                    div()
-                        .text_size(rems(TAB_TEXT))
-                        .line_height(rems(TAB_TEXT * 1.5))
-                        .text_color(muted)
-                        .child(detail),
-                )
-            }))
-            .child(
-                dialog::footer(cx)
-                    .children(apart)
-                    .when(self.answers.len() >= 3, |row| row.child(div().flex_1()))
-                    .children(packed),
-            );
+                div()
+                    .text_size(rems(TAB_TEXT))
+                    .line_height(rems(TAB_TEXT * 1.45))
+                    .text_color(muted)
+                    .child(detail)
+            }));
+
+        let answers = h_flex()
+            .items_center()
+            .gap(px(8.))
+            .children(apart)
+            .child(div().flex_1())
+            .children(packed);
+
+        let card = dialog::card(ALERT_W, cx)
+            .max_w(gpui::relative(0.9))
+            .gap(px(16.))
+            .pt(px(20.))
+            .px(px(20.))
+            .pb(px(16.))
+            .child(text)
+            .child(answers);
+
+        // Lower than the switcher's drop: an alert is read, not typed into,
+        // and v5 sets it at eye height. A short window pulls it up rather
+        // than pushing the buttons off the bottom.
+        let top = (window.viewport_size().height.as_f32() * 0.22).clamp(16., ALERT_TOP);
 
         div()
             .id("text-prompt")
@@ -235,7 +238,7 @@ impl Render for TextPrompt {
             .flex_col()
             .items_center()
             .justify_start()
-            .pt(px(crate::ui::switcher::CARD_TOP))
+            .pt(px(top))
             .child(card)
     }
 }
