@@ -511,8 +511,10 @@ pub struct TerminalView {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct HoveredLink {
-    pub start: Point,
-    pub end: Point,
+    /// The cells to underline, one run per row. A link in a table cell
+    /// shares its rows with other cells, so its extent is not always one
+    /// stretch of the grid from a start to an end.
+    pub runs: Vec<(Point, Point)>,
     /// Whether the modifier that would open this link is down.
     ///
     /// A link underlines as soon as the pointer reaches it, so the user can
@@ -532,8 +534,9 @@ enum LoopbackOpen {
 
 /// What sits under a cell, once the grid has been read.
 enum GridLink {
-    /// An OSC 8 hyperlink the emitter declared, with the extent it declared.
-    Hyperlink(String, Point, Point),
+    /// An OSC 8 hyperlink the emitter declared, with the extent it declared,
+    /// one run per row.
+    Hyperlink(String, Vec<(Point, Point)>),
     /// The logical line the cell belongs to, the grid point of every character
     /// in it, and which of those the cell is.
     Text(String, Vec<Point>, usize),
@@ -541,7 +544,8 @@ enum GridLink {
 
 /// The outcome of asking what a cell links to.
 enum LinkAt {
-    Found(LinkTarget, Point, Point),
+    /// A link, and the cells it covers as one run per row.
+    Found(LinkTarget, Vec<(Point, Point)>),
     /// A token that parses as a path, that nothing has answered for.
     /// `pending` separates the two reasons: the path is not there, or the host
     /// that would know has not replied yet.
@@ -6294,7 +6298,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Option<HoveredLink> {
         match self.resolve_link_at(col, row, true, include_loopback, cx) {
-            LinkAt::Found(_, start, end) => Some(HoveredLink { start, end, armed }),
+            LinkAt::Found(_, runs) => Some(HoveredLink { runs, armed }),
             LinkAt::Unresolved { .. } | LinkAt::None => None,
         }
     }
@@ -6311,8 +6315,8 @@ impl TerminalView {
             return LinkAt::None;
         };
         let (text, points, click_idx) = match line {
-            GridLink::Hyperlink(uri, start, end) => {
-                return LinkAt::Found(LinkTarget::Url(uri), start, end);
+            GridLink::Hyperlink(uri, runs) => {
+                return LinkAt::Found(LinkTarget::Url(uri), runs);
             }
             GridLink::Text(text, points, click_idx) => (text, points, click_idx),
         };
@@ -6359,7 +6363,11 @@ impl TerminalView {
             })?
         });
         match link {
-            Some(link) => LinkAt::Found(link.target, points[link.start], points[link.end]),
+            Some(link) => {
+                let term = self.terminal.term.lock();
+                let runs = super::smart_select::row_runs(&term, &points[link.start..=link.end]);
+                LinkAt::Found(link.target, runs)
+            }
             // Nothing answered. Hand back what the token *said* so a click can
             // say so out loud instead of looking broken.
             None => match files
@@ -6385,7 +6393,8 @@ impl TerminalView {
         if let Some(hl) = term.grid()[line][Column(col)].hyperlink() {
             let uri = hl.uri().to_string();
             if let Some((start, end)) = super::smart_select::hyperlink_run(&term, click) {
-                return Some(GridLink::Hyperlink(uri, start, end));
+                let runs = super::smart_select::grid_runs(start, end, term.columns());
+                return Some(GridLink::Hyperlink(uri, runs));
             }
         }
 
@@ -11594,8 +11603,10 @@ mod gpui_tests {
                 view.hover_link_at(0, 23, true, cx);
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
                 view.hovered_link = Some(HoveredLink {
-                    start: Point::new(Line(23), Column(0)),
-                    end: Point::new(Line(23), Column(3)),
+                    runs: vec![(
+                        Point::new(Line(23), Column(0)),
+                        Point::new(Line(23), Column(3)),
+                    )],
                     armed: true,
                 });
                 view.set_grid_size(80, 24, px(8.), px(17.), 1., cx);
@@ -11648,12 +11659,13 @@ mod gpui_tests {
                         "the wrapped path is a link from {where_}"
                     );
                     let link = view.hovered_link.as_ref().expect("a span");
+                    let (start, end) = (link.runs[0].0, link.runs[link.runs.len() - 1].1);
                     assert_eq!(
-                        (link.start.line, link.end.line),
+                        (start.line, end.line),
                         (Line(0), Line(1)),
                         "and the span the element paints covers both rows"
                     );
-                    assert_eq!(link.start.column, Column(4), "starting at the path itself");
+                    assert_eq!(start.column, Column(4), "starting at the path itself");
                 }
             })
             .unwrap();
