@@ -1685,7 +1685,7 @@ mod tests {
         assert_eq!(action_entry("NewWindow").1, "New Window");
         assert_eq!(action_entry("CloseWindow").1, "Close Window");
         assert_eq!(action_entry("ClearScrollback").1, "Clear Scrollback");
-        assert_eq!(action_entry("TogglePalette").1, "Search Everywhere…");
+        assert_eq!(action_entry("TogglePalette").1, "Search…");
         assert_eq!(action_entry("ToggleSwitcher").1, "Switch Workspace…");
         // The numbered families are templated, not nine strings per locale.
         assert_eq!(action_entry("ActivateTab3").1, "Go to Tab 3");
