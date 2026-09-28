@@ -49,6 +49,11 @@ fn build(
 /// worktree form, with three fields, is 440.
 const ALERT_W: f32 = 360.;
 
+/// A third answer does not fit beside the other two at [`ALERT_W`]: the
+/// update prompt's "Update and relaunch / Install on Next Launch / Later"
+/// needs about 400 of button row, and the card clipped it.
+const ALERT_W_WIDE: f32 = 460.;
+
 /// How far down the alert sits, at most.
 const ALERT_TOP: f32 = 180.;
 
@@ -186,14 +191,23 @@ impl Render for TextPrompt {
                     .child(detail)
             }));
 
+        // Buttons never shrink, so a row too long for the card — a locale
+        // with longer labels than the width was sized for — wraps onto a
+        // second line, still flush right, rather than running off the edge.
         let answers = h_flex()
+            .flex_wrap()
+            .justify_end()
             .items_center()
             .gap(px(8.))
             .children(apart)
             .child(div().flex_1())
             .children(packed);
 
-        let card = dialog::card(ALERT_W, cx)
+        let width = match self.answers.len() {
+            0..=2 => ALERT_W,
+            _ => ALERT_W_WIDE,
+        };
+        let card = dialog::card(width, cx)
             .max_w(gpui::relative(0.9))
             .gap(px(16.))
             .pt(px(20.))
