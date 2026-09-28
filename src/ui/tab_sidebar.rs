@@ -36,14 +36,14 @@ const ROW_GAP: f32 = 1.;
 
 /// What marks a kept group, and what the header button that keeps one reads.
 ///
-/// A character rather than an icon: at a header's size a drawn pin is a
-/// smudge, and the mark only has to say "kept" beside the name, the way a
-/// bullet does. With no line between kept and derived groups it is also the
-/// only thing that tells the two apart, so every kept group carries it.
-const PIN_MARK: &str = "\u{25C6}";
+/// A pin, drawn: it names what was done to the group, where the `◆` it
+/// replaced only said "different". With no line between kept and derived
+/// groups it is also the only thing that tells the two apart, so every kept
+/// group carries it.
+const PIN_MARK: &str = "icons/pin.svg";
 
-/// The mark's size: small enough to sit under the header text's x-height.
-const PIN_MARK_SIZE: f32 = 8.;
+/// The mark's size: the header's 11px text, like a row's branch icon.
+const PIN_MARK_SIZE: f32 = 11.;
 
 /// A single-line tab row: one line of `text_sm` and a little air.
 const ROW_HEIGHT: f32 = 30.;
@@ -1331,9 +1331,7 @@ impl Tty7App {
                     .when_some(pinned_id, |header, id| {
                         let mark = div()
                             .flex_shrink_0()
-                            .text_size(px(PIN_MARK_SIZE))
-                            .line_height(px(PIN_MARK_SIZE))
-                            .child(PIN_MARK);
+                            .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)));
                         header.child(match pinned_folder.is_some() {
                             false => mark.into_any_element(),
                             true => mark
@@ -1641,6 +1639,37 @@ impl Tty7App {
             list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
         }
 
+        // The room under the last row. Right-clicking a row opens that tab's
+        // menu, so the list's own — new tab, new group — lives here rather
+        // than on the list, where it would open over every row's as well.
+        // It keeps a row's height when the list scrolls, so there is always
+        // somewhere to click.
+        list = list.child(
+            div()
+                .id("tab-sidebar-empty")
+                .flex_1()
+                .min_h(px(ROW_HEIGHT))
+                .context_menu({
+                    let app = cx.entity().downgrade();
+                    move |menu, _window, _cx| {
+                        let new_tab = app.clone();
+                        let new_group = app.clone();
+                        menu.min_w(px(200.))
+                            .item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
+                                move |_, window, cx| {
+                                    let _ = new_tab.update(cx, |this, cx| this.new_tab(window, cx));
+                                },
+                            ))
+                            .item(PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(
+                                move |_, window, cx| {
+                                    let _ = new_group
+                                        .update(cx, |this, cx| this.new_empty_group(window, cx));
+                                },
+                            ))
+                    }
+                }),
+        );
+
         if !any_rows && !query.is_empty() {
             list = list.child(
                 div()
@@ -1918,10 +1947,15 @@ impl Tty7App {
             .relative()
             .w_full()
             .px_2()
-            // Less than when it was a drawn rule: the next header's own top
-            // margin already opens the gap between the two kinds of group.
-            .pt(px(4.))
-            .pb(px(2.))
+            .map(|d| match zone {
+                true => d.pt(px(4.)).pb(px(2.)),
+                // The rule takes up the gap between two groups instead of
+                // adding one of its own: as a child of the list it would
+                // otherwise sit between two `GROUP_GAP`s, and kept groups
+                // stood more than twice as far from the rest as groups stand
+                // from each other.
+                false => d.h(px(GROUP_GAP)).my(px(-GROUP_GAP)).justify_center(),
+            })
             .child(
                 canvas(move |b, _window, _cx| bounds.set(Some(b)), |_, _, _, _| {})
                     .absolute()
@@ -1976,17 +2010,7 @@ impl Tty7App {
                     "sidebar-group-pin",
                     // The mark the group will carry once kept, the size of
                     // the icon beside it so the two buttons line up.
-                    div()
-                        .size(px(12.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(PIN_MARK_SIZE))
-                        // Its own line box: the header's is several times the
-                        // mark's size and would drop it below the "+" beside it.
-                        .line_height(px(PIN_MARK_SIZE))
-                        .child(PIN_MARK)
-                        .into_any_element(),
+                    Icon::empty().path(PIN_MARK).xsmall().into_any_element(),
                     L10nKey::SidebarPinGroup,
                 )
                 .on_mouse_down(
