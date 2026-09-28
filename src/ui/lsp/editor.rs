@@ -382,7 +382,10 @@ impl Tty7App {
 
     /// The status bar's word on the front file's server: its problem counts
     /// once it runs, or why there are none.
-    pub(crate) fn render_lsp_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The language server's state for the status bar, and whether it is the
+    /// missing-server note, which leads the bar rather than joining the
+    /// readouts at its end.
+    pub(crate) fn render_lsp_status(&self, cx: &mut Context<Self>) -> Option<(AnyElement, bool)> {
         if !Self::lsp_enabled(cx) {
             return None;
         }
@@ -390,10 +393,31 @@ impl Tty7App {
         let status = LspStore::status(&f.path, f.language, cx)?;
         let muted = cx.theme().muted_foreground;
         let element = match status {
-            LspStatus::Missing(name) => div()
-                .flex_none()
-                .child(t_fmt(L10nKey::LspServerMissing, &[("name", name)]))
-                .into_any_element(),
+            LspStatus::Missing(name) => {
+                return Some((
+                    h_flex()
+                        .min_w_0()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(5.))
+                                .rounded_full()
+                                .bg(cx.theme().warning),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(t_fmt(L10nKey::LspServerMissing, &[("name", name)])),
+                        )
+                        .into_any_element(),
+                    true,
+                ));
+            }
             LspStatus::Starting(name) => div()
                 .flex_none()
                 .child(t_fmt(L10nKey::LspServerStarting, &[("name", &name)]))
@@ -442,6 +466,6 @@ impl Tty7App {
                     .into_any_element()
             }
         };
-        Some(element)
+        Some((element, false))
     }
 }

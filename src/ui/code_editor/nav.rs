@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Window, div, px};
 use gpui_component::input::{LineEdit, Position};
-use gpui_component::{ActiveTheme as _, h_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
 use tty7_core::core::machine::TabId;
 
 use super::outline::{self, Outline, SymbolKind};
@@ -744,7 +744,7 @@ impl Tty7App {
         id: BufferId,
         slot: usize,
         focused: bool,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let f = self.buffer(id)?;
@@ -774,7 +774,15 @@ impl Tty7App {
 
         let theme = cx.theme();
         let (fg, muted) = (theme.foreground, theme.muted_foreground);
-        let sep = || div().flex_none().px(px(4.)).text_color(muted).child("›");
+        // A chevron a rung fainter than the names, so the path reads as its
+        // names and the separators recede.
+        let sep = || {
+            div().flex_none().px(px(4.)).child(
+                Icon::new(IconName::ChevronRight)
+                    .size(px(9.))
+                    .text_color(muted.opacity(0.6)),
+            )
+        };
         let last = segments.len().saturating_sub(1);
         let mut path = h_flex()
             .flex_shrink(1.)
@@ -821,7 +829,7 @@ impl Tty7App {
                         .when(kind != SymbolKind::Impl, |d| {
                             d.child(div().text_color(muted).child(kind.tag()))
                         })
-                        .child(div().text_color(fg).child(name)),
+                        .child(div().text_color(muted).child(name)),
                 );
             }
             div()
@@ -851,12 +859,10 @@ impl Tty7App {
                 .id(("editor-breadcrumbs", slot))
                 .flex_none()
                 .w_full()
-                .h(px(24.))
+                .h(px(26.))
                 .items_center()
                 .overflow_hidden()
                 .px(px(crate::ui::app::CONTENT_INSET))
-                .border_b(crate::ui::theme::hairline(window))
-                .border_color(cx.theme().sidebar_border)
                 .text_size(gpui::rems(crate::ui::right_panel::META))
                 .child(path)
                 .children(symbols)

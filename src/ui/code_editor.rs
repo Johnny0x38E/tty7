@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, Context, Entity, EntityInputHandler as _, Focusable as _, MouseButton, PromptLevel,
     SharedString, Subscription, Window, div, px, rems,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState, Position, RopeExt as _, TabSize};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_component::{
@@ -27,6 +27,7 @@ mod nav;
 pub(crate) mod outline;
 mod problems;
 mod split;
+mod strip;
 
 pub(crate) use nav::KEY_CONTEXT as NAV_KEY_CONTEXT;
 
@@ -191,6 +192,10 @@ pub(crate) struct TabCode {
     /// the focus. `files` and `active` above are always the focused group's
     /// (see `split`).
     pub(crate) split: Option<split::OtherGroup>,
+    /// Buffers in the order they were last in front, most recent first —
+    /// what decides which files keep a place in the header's strip when
+    /// it cannot hold them all (see `strip`).
+    pub(crate) recent: Vec<BufferId>,
 }
 
 impl TabCode {
@@ -203,6 +208,7 @@ impl TabCode {
             expanded: std::collections::HashSet::new(),
             selected: None,
             split: None,
+            recent: Vec::new(),
         }
     }
 
@@ -327,6 +333,8 @@ pub(crate) struct EditorPanelState {
     nav: nav::EditorNav,
     /// The Problems list at the foot of the panel — see `problems`.
     problems: problems::ProblemsPane,
+    /// The header's list of every open file, while it is open.
+    strip_picker: Option<strip::StripPicker>,
 }
 
 impl EditorPanelState {
@@ -371,6 +379,7 @@ impl EditorPanelState {
             events_tx: tx,
             nav: nav::EditorNav::new(cx),
             problems: Default::default(),
+            strip_picker: None,
         }
     }
 }
@@ -427,6 +436,49 @@ pub(crate) fn language_for_path(path: &Path) -> &'static str {
         "cmake" | "mk" => "cmake",
         _ => "text",
     }
+}
+
+/// What the status bar calls a language id from [`language_for_path`].
+/// `None` for plain text, which the bar leaves unsaid.
+fn language_label(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "rust" => "Rust",
+        "go" => "Go",
+        "python" => "Python",
+        "javascript" => "JavaScript",
+        "typescript" => "TypeScript",
+        "tsx" => "TypeScript JSX",
+        "json" => "JSON",
+        "toml" => "TOML",
+        "yaml" => "YAML",
+        "html" => "HTML",
+        "css" => "CSS",
+        "markdown" => "Markdown",
+        "bash" => "Shell",
+        "c" => "C",
+        "cpp" => "C++",
+        "java" => "Java",
+        "kotlin" => "Kotlin",
+        "lua" => "Lua",
+        "ruby" => "Ruby",
+        "php" => "PHP",
+        "sql" => "SQL",
+        "swift" => "Swift",
+        "scala" => "Scala",
+        "zig" => "Zig",
+        "proto" => "Protocol Buffers",
+        "diff" => "Diff",
+        "elixir" => "Elixir",
+        "erb" => "ERB",
+        "ejs" => "EJS",
+        "svelte" => "Svelte",
+        "astro" => "Astro",
+        "graphql" => "GraphQL",
+        "csharp" => "C#",
+        "cmake" => "CMake",
+        "make" => "Makefile",
+        _ => return None,
+    })
 }
 
 /// How many frames a jump-to-line may wait for the editor to be laid out.
@@ -3108,6 +3160,9 @@ impl Tty7App {
         self.editor_split_follow_focus(window, cx);
         self.editor_gutter_sync(cx);
         self.editor_nav_tick(cx);
+        if let Some(code) = self.tab_code_mut() {
+            code.note_front();
+        }
         let breadcrumbs = self.render_editor_breadcrumbs(window, cx);
         let body = self.render_editor_body(
             self.tab_code().and_then(TabCode::active_id),
@@ -3276,38 +3331,37 @@ impl Tty7App {
         } else {
             row
         };
-        let menu_app = cx.entity().downgrade();
-        // v4 chrome: the file names in body ink — the one heading the column
-        // has — a hairline in the divider tone under the bar, and the rail's
-        // 26px close tile, so the header reads as part of the plane it sits in
-        // rather than a toolbar bolted on top of it.
+        // v6 chrome: no rule under the bar — the header, the breadcrumbs and
+        // the text are one plane — and only as many file cells as the column
+        // has room for, the rest behind a `+N` list (see `strip`).
         let (tile, glyph) = (
             crate::ui::tab_strip::RAIL_TILE,
             crate::ui::tab_strip::RAIL_TILE_GLYPH,
         );
-        let files: Vec<(usize, SharedString, String, bool, bool)> = self
+        let cap = self.editor_strip_cap(chrome, cx);
+        let (shown, hidden) = self
             .tab_code()
-            .map(|c| {
-                c.files
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(pos, id)| {
-                        let f = self.buffer(*id)?;
-                        let tip = if f.untitled.is_some() {
-                            f.label().to_string()
-                        } else {
-                            f.path.display().to_string()
-                        };
-                        Some((pos, f.label(), tip, pos == c.active, f.dirty))
-                    })
-                    .collect()
-            })
+            .map(|c| c.strip_split(cap))
             .unwrap_or_default();
+        let active_id = self.tab_code().and_then(TabCode::active_id);
+        let files: Vec<(usize, SharedString, String, bool, bool)> = shown
+            .into_iter()
+            .filter_map(|(pos, id)| {
+                let f = self.buffer(id)?;
+                let tip = if f.untitled.is_some() {
+                    f.label().to_string()
+                } else {
+                    f.path.display().to_string()
+                };
+                Some((pos, f.label(), tip, Some(id) == active_id, f.dirty))
+            })
+            .collect();
         let strip = if files.is_empty() {
             div()
                 .min_w_0()
+                .px(px(8.))
                 .text_ellipsis()
-                .text_size(gpui::rems(crate::ui::right_panel::TEXT))
+                .text_size(gpui::rems(strip::CELL_TEXT))
                 .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from(t(L10nKey::EditorNoFileOpen)))
                 .into_any_element()
@@ -3315,26 +3369,28 @@ impl Tty7App {
             h_flex()
                 .id("editor-file-tabs")
                 .min_w_0()
-                .h_full()
-                .overflow_x_scroll()
+                .gap(px(2.))
+                .overflow_hidden()
                 .children(files.into_iter().map(|(pos, name, tip, active, dirty)| {
                     self.render_file_tab(pos, name, tip, active, dirty, cx)
                 }))
                 .into_any_element()
         };
+        let back =
+            (chrome == DocumentChrome::Fill).then(|| self.render_back_to_terminal(window, cx));
         row.flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()
-            .gap(px(4.))
+            .gap(px(2.))
             .pl(px(lead - 8.).max(px(0.)))
             // The glyph, not the tile, lands on `CONTENT_INSET`, the column
             // the file name starts on at the other end of the bar.
             .pr(px(crate::ui::app::CONTENT_INSET - (tile - glyph) / 2.))
-            .border_b(crate::ui::theme::hairline(window))
-            .border_color(cx.theme().sidebar_border)
+            .children(back)
             .child(strip)
+            .children(self.render_strip_overflow(&hidden, cap, cx))
             .child(
-                div().occlude().flex_shrink_0().child(
+                div().occlude().flex_none().child(
                     crate::ui::tab_strip::chrome_tile_sized(
                         Button::new("editor-new-file").icon(Icon::new(IconName::Plus)),
                         tile,
@@ -3351,8 +3407,9 @@ impl Tty7App {
             )
             // Whatever is left of the bar stays a place to drag the window by.
             .child(div().flex_1().h_full())
+            .child(self.render_layout_switch(chrome, cx))
             .child(
-                div().occlude().flex_shrink_0().child(
+                div().occlude().flex_none().ml(px(4.)).child(
                     crate::ui::tab_strip::chrome_tile_sized(
                         Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
                         tile,
@@ -3367,9 +3424,6 @@ impl Tty7App {
                     })),
                 ),
             )
-            .context_menu(move |menu, _window, cx| {
-                Tty7App::document_header_menu(menu, &menu_app, cx)
-            })
     }
 
     /// One file in the header's strip: its name, and a slot that shows the
@@ -3385,7 +3439,8 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let group: SharedString = format!("editor-file-tab-{pos}").into();
-        let slot = crate::ui::tab_strip::ROW_STATUS_SLOT;
+        let slot = 16.;
+        let muted = cx.theme().muted_foreground;
         let close = div()
             .id(("editor-file-tab-close", pos))
             .flex_none()
@@ -3393,61 +3448,64 @@ impl Tty7App {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(3.))
+            .rounded(px(4.))
             .hover(|s| s.bg(cx.theme().muted))
-            .child(
-                Icon::new(IconName::Close)
-                    .xsmall()
-                    .text_color(cx.theme().muted_foreground),
-            )
+            .child(Icon::new(IconName::Close).xsmall().text_color(muted))
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.editor_close_file(pos, window, cx);
             }));
+        // Unsaved is a state, not an alarm: the dot is in caption ink, the
+        // same as the `+N` button's, not the warning hue.
         let slot_el = div()
             .flex_none()
             .size(px(slot))
             .flex()
             .items_center()
             .justify_center()
-            .map(|d| {
-                if dirty {
-                    d.child(
-                        div()
-                            .group_hover(group.clone(), |s| s.invisible())
-                            .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
-                            .rounded_full()
-                            .bg(cx.theme().warning),
-                    )
-                } else {
-                    d
-                }
+            .when(dirty, |d| {
+                d.child(
+                    div()
+                        .group_hover(group.clone(), |s| s.invisible())
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(muted),
+                )
             });
         div()
             .id(("editor-file-tab", pos))
             .group(group.clone())
             .occlude()
             .flex_none()
-            .h(px(26.))
+            .min_w_0()
+            .max_w(px(strip::CELL_MAX_W))
+            .h(px(strip::CELL_H))
             .flex()
             .items_center()
-            .gap(px(4.))
-            .pl(px(8.))
-            .pr(px(4.))
-            .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-            .text_size(gpui::rems(crate::ui::right_panel::TEXT))
+            .gap(px(6.))
+            .pl(px(10.))
+            .pr(px(6.))
+            .rounded(px(strip::CELL_RADIUS))
+            .text_size(gpui::rems(strip::CELL_TEXT))
             .map(|d| match active {
                 true => d
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().foreground)
                     .bg(cx.theme().sidebar_accent),
-                false => d.text_color(cx.theme().muted_foreground).hover(|s| {
+                false => d.text_color(muted).hover(|s| {
                     s.bg(gpui::rgb(
                         cx.global::<crate::ui::presets::Surfaces>().sidebar.hover,
                     ))
                 }),
             })
-            .child(div().whitespace_nowrap().child(name))
+            .child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(name),
+            )
             .child(
                 div()
                     .relative()
@@ -3558,23 +3616,49 @@ impl Tty7App {
         });
         let line_ending: Option<&'static str> = active.map(|f| f.format.line_ending.label());
         let encoding: Option<SharedString> = active.map(|f| f.format.encoding_label().into());
+        let language: Option<&'static str> = active.and_then(|f| language_label(f.language()));
+        let (lsp_lead, lsp_tail) = match self.render_lsp_status(cx) {
+            Some((el, true)) => (Some(el), None),
+            Some((el, false)) => (None, Some(el)),
+            None => (None, None),
+        };
 
         // Metadata, not a toolbar: caption ink on the plane's own fill, set
         // off by a hairline in the divider tone rather than a control border.
+        // The readouts that do something answer the pointer with a soft fill
+        // and body ink; the rest are plain text in the same row.
+        let fg = cx.theme().foreground;
+        let hover = cx.theme().muted;
+        let item = |id: &'static str, label: SharedString| {
+            div()
+                .id(id)
+                .flex_none()
+                .h(px(20.))
+                .px(px(4.))
+                .mx(px(-4.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover).text_color(fg))
+                .child(label)
+        };
         h_flex()
             .flex_none()
             .w_full()
-            .h(px(26.))
+            .h(px(28.))
             .items_center()
-            .gap_3()
+            .gap(px(14.))
             .px(px(crate::ui::app::CONTENT_INSET))
             .border_t(crate::ui::theme::hairline(window))
             .border_color(cx.theme().sidebar_border)
-            .text_size(gpui::rems(crate::ui::right_panel::META))
+            .text_size(gpui::rems(11.5 / 16.))
             .text_color(muted)
+            .whitespace_nowrap()
+            .children(lsp_lead)
             .child(div().flex_1())
             // The counts open the Problems list.
-            .children(self.render_lsp_status(cx).map(|status| {
+            .children(lsp_tail.map(|status| {
                 div()
                     .id("status-problems")
                     .flex_none()
@@ -3583,32 +3667,35 @@ impl Tty7App {
                     .child(status)
             }))
             .when(is_markdown, |this| {
+                let label = if preview {
+                    t(L10nKey::EditorEdit)
+                } else {
+                    t(L10nKey::EditorPreview)
+                };
                 this.child(
-                    Button::new("status-md-preview")
-                        .label(if preview {
-                            t(L10nKey::EditorEdit)
-                        } else {
-                            t(L10nKey::EditorPreview)
-                        })
-                        .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
-                        .xsmall()
+                    item("status-md-preview", label.into())
                         .on_click(cx.listener(|this, _, _w, cx| this.toggle_document_preview(cx))),
                 )
             })
             .when_some(wrap, |this, wrap| {
+                let label = if wrap {
+                    t(L10nKey::EditorWrapOn)
+                } else {
+                    t(L10nKey::EditorWrapOff)
+                };
+                this.child(item("status-wrap", label.into()).on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_document_wrap(window, cx)),
+                ))
+            })
+            // Tabular figures, so the position does not jitter sideways as
+            // the caret walks from line 9 to line 10. A click asks for a line
+            // to go to.
+            .when_some(cursor, |this, t| {
                 this.child(
-                    Button::new("status-wrap")
-                        .label(if wrap {
-                            t(L10nKey::EditorWrapOn)
-                        } else {
-                            t(L10nKey::EditorWrapOff)
-                        })
-                        .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
-                        .xsmall()
+                    item("status-cursor", t)
+                        .font_features(crate::ui::theme::tabular_figures())
                         .on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.toggle_document_wrap(window, cx)
-                            }),
+                            cx.listener(|this, _, window, cx| this.editor_go_to_line(window, cx)),
                         ),
                 )
             })
@@ -3616,22 +3703,11 @@ impl Tty7App {
             .when_some(encoding, |this, t| this.child(div().flex_none().child(t)))
             .when_some(line_ending, |this, eol| {
                 this.child(
-                    Button::new("status-eol")
-                        .label(eol)
-                        .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
-                        .xsmall()
+                    item("status-eol", eol.into())
                         .on_click(cx.listener(|this, _, _w, cx| this.toggle_line_ending(cx))),
                 )
             })
-            // Tabular figures, so the position does not jitter sideways as
-            // the caret walks from line 9 to line 10.
-            .when_some(cursor, |this, t| {
-                this.child(
-                    div()
-                        .font_features(crate::ui::theme::tabular_figures())
-                        .child(t),
-                )
-            })
+            .when_some(language, |this, l| this.child(div().flex_none().child(l)))
     }
 
     fn render_editor_empty(&self, cx: &Context<Self>) -> gpui::Div {
