@@ -1,0 +1,325 @@
+---
+title: "diag 323"
+mode: "custom"
+---
+
+{/* Mirrors CLIAgent::accent_rgb / icon_path: a solid brand disc with the
+   agent's own mark masked in white on top, as tab_strip.rs avatar_disc draws it. */}
+export const AGENTS = {
+  claude: { name: "Claude Code", c: "#D97757" },
+  codex: { name: "Codex", c: "#000000", edge: true },
+  gemini: { name: "Gemini", c: "#4285F4" },
+  cursor: { name: "Cursor", c: "#9AA0A6" },
+  opencode: { name: "OpenCode", c: "#6E56CF" },
+  copilot: { name: "Copilot", c: "#8957E5" },
+};
+
+export const GROUPS = [
+  { name: "atlas-api", meta: "main", items: [
+    { a: "claude", t: "Spin up a staging instance", s: "working" },
+    { a: "codex", t: "Inspect CLI error logs", s: "working" },
+  ] },
+  { name: "northwind", meta: "", items: [
+    { a: "cursor", t: "Refactor session auth", b: "feat/session-auth", s: "waiting" },
+    { a: "gemini", t: "Fix pricing fetch timeout", b: "fix/pricing-fetch-timeout", s: "working" },
+  ] },
+  { name: "orbit", meta: "main  ·  +104 −12", items: [
+    { shell: true, t: "~/code/orbit", on: true },
+    { a: "claude", t: "Optimize route planner" },
+  ] },
+  { name: "lumen-web", meta: "main  ·  +259 −191", items: [
+    { a: "copilot", t: "Backtest search ranking" },
+  ] },
+];
+
+export const Glyph = ({ a, shell }) => shell
+  ? <span className="t7w-glyph is-shell">{">_"}</span>
+  : <span className={"t7w-glyph" + (AGENTS[a].edge ? " is-edge" : "")} style={{ background: AGENTS[a].c }} title={AGENTS[a].name}>
+      <span className="t7w-mark" style={{ WebkitMaskImage: "url(/images/agents/" + a + ".svg)", maskImage: "url(/images/agents/" + a + ".svg)" }} />
+    </span>;
+
+export const Row = ({ it }) => (
+  <div className={"t7w-row" + (it.b ? " is-tall" : "") + (it.on ? " is-on" : "")}>
+    <Glyph a={it.a} shell={it.shell} />
+    <div className="t7w-rtext">
+      <span>{it.t}</span>
+      {it.b ? <span className="t7w-branch">{it.b}</span> : null}
+    </div>
+    {it.s ? <span className={"t7w-dot is-" + it.s} /> : null}
+  </div>
+);
+
+export const Group = ({ g }) => (
+  <div className="t7w-group">
+    <div className="t7w-ghead"><b>{g.name}</b><span>{g.meta}</span></div>
+    {g.items.map((it) => <Row key={it.t} it={it} />)}
+  </div>
+);
+
+export const Search = () => (
+  <svg width="11" height="11" viewBox="0 0 12 12" style={{ flexShrink: 0 }}>
+    <circle cx="5" cy="5" r="3.9" fill="none" stroke="var(--w-a35)" strokeWidth="1.2" />
+    <path d="M8 8l2.8 2.8" stroke="var(--w-a35)" strokeWidth="1.2" strokeLinecap="round" />
+  </svg>
+);
+
+export const Check = () => (
+  <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="var(--w-green)" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+);
+
+export const Cross = () => (
+  <svg width="12" height="12" viewBox="0 0 12 12"><path d="M3.5 3.5l5 5M8.5 3.5l-5 5" fill="none" stroke="var(--w-red)" strokeWidth="1.4" strokeLinecap="round" /></svg>
+);
+
+export const State = ({ s }) => (
+  <span className="t7w-ck">{s === "ok" ? <Check /> : s === "fail" ? <Cross /> : <span className="t7w-spin" />}</span>
+);
+
+export const CHECKS = [["lint", "ok", "18s"], ["typecheck", "ok", "41s"], ["test (py3.12)", "run", "2m"], ["build image", "ok", "1m 12s"]];
+export const PRS = [
+  ["Add export endpoints", "#214  ·  Merged 1d ago", "ok"],
+  ["Refactor session auth", "#228  ·  feat/session-auth  ·  Draft", "run"],
+  ["Fix pricing fetch timeout", "#229  ·  1 check failing", "fail"],
+];
+
+export const Inspector = () => (
+  <aside className="t7w-ins">
+    <div className="t7w-bar"><span>Info</span><span>Files</span><span>Changes</span><span className="is-on">PR</span></div>
+    <div className="t7w-pr">
+      <div className="t7w-prhead">
+        <div className="t7w-meta"><span>#231</span><span>·</span><span>Open</span><span className="grow" /><span>12m ago</span></div>
+        <div className="t7w-prtitle">Handle empty daily summaries</div>
+        <div className="t7w-prbranch"><b>fix/report-daily-summary</b> → main</div>
+        <div className="t7w-practs"><span className="t7w-merge">Squash and merge</span><span className="note">Waiting on 1 check</span></div>
+      </div>
+      <div className="t7w-sect">
+        <div className="t7w-shead"><b>Checks</b><span>3 of 4 passed</span></div>
+        {CHECKS.map(([n, s, t]) => (
+          <div className="t7w-item" key={n}><State s={s} /><span className="grow">{n}</span><span className="dim">{t}</span></div>
+        ))}
+      </div>
+      <div className="t7w-sect">
+        <div className="t7w-shead"><b>Reviews</b></div>
+        <div className="t7w-item"><span className="t7w-avatar">M</span><span className="grow">mara</span><span className="dim" style={{ color: "var(--w-green)" }}>Approved</span></div>
+        <div className="t7w-item"><span className="t7w-avatar">J</span><span className="grow">jonas</span><span className="dim">Requested</span></div>
+      </div>
+      <div className="t7w-sect">
+        <div className="t7w-shead"><b>Pull requests</b></div>
+        {PRS.map(([t, m, s]) => (
+          <div className="t7w-pritem" key={t}><State s={s} /><div><span className="t">{t}</span><span className="m">{m}</span></div></div>
+        ))}
+      </div>
+    </div>
+  </aside>
+);
+
+{/* The hero demo. Five chapters after the promo storyboard
+   (videos/tty7-promo/STORYBOARD.md), each a pure function of the seconds t
+   since it began, so any frame can be drawn directly and a click can jump
+   to any chapter. */}
+
+export const CHAPTERS = [
+  { key: "agents", label: "Every agent", d: 7.5 },
+  { key: "cli", label: "Agents drive it", d: 9.5 },
+  { key: "prompt", label: "Editor prompt", d: 7.5 },
+  { key: "search", label: "⌘P everything", d: 8 },
+  { key: "persist", label: "Quit, keep running", d: 7.5 },
+];
+
+export const typed = (s, t, t0, cps = 22) => (t < t0 ? "" : s.slice(0, Math.floor((t - t0) * cps)));
+export const typingDone = (s, t, t0, cps = 22) => t >= t0 + s.length / cps;
+export const hl = (s, q) => {
+  const i = q ? s.toLowerCase().indexOf(q) : -1;
+  return i < 0 ? s : <>{s.slice(0, i)}<mark>{s.slice(i, i + q.length)}</mark>{s.slice(i + q.length)}</>;
+};
+
+export const P = ({ br = "main", caret, children }) => (
+  <div className="t7w-prompt">
+    <span className="p-arrow">→</span><span className="p-dir">orbit</span><span className="p-br">{br}</span><span className="p-dirty">●</span>
+    <span className="p-cmd">{children}{caret ? <span className="t7w-caret" /> : null}</span>
+  </div>
+);
+
+export const O = ({ c = "", children }) => <div className={"t7w-out " + c}>{children}</div>;
+
+{/* Sidebar for a frame: the base groups plus whatever the chapter changed. */}
+export const sidebar = (ch, t) => {
+  const g = GROUPS.map((x) => ({ ...x, items: x.items.map((it) => ({ ...it })) }));
+  const find = (title) => g.flatMap((x) => x.items).find((it) => it.t === title);
+  if (ch === 0) find("Refactor session auth").s = t < 3.1 ? "working" : "waiting";
+  // A split stays in the same tab; the tab picks up the agent's status.
+  if (ch === 1 && t >= 3.2) find("~/code/orbit").s = t < 6.4 ? "working" : "done";
+  if ((ch === 3 && t >= 4.1) || ch === 4) {
+    find("~/code/orbit").on = false;
+    g[0].items.unshift({ a: "claude", t: "Handle empty daily summaries", s: ch === 4 && t >= 5.2 ? "done" : "working", on: true });
+  }
+  return g;
+};
+
+export const AgentsTable = ({ cursor }) => (
+  <>
+    <O c="o-head">{"PANE  AGENT    STATUS   MESSAGE"}</O>
+    {AGENT_ROWS.map(([p, a, s, m]) => {
+      const st = a === "cursor" ? cursor : s;
+      return <O key={p}>{p.padEnd(6)}{a.padEnd(9)}<span className={"o-" + st}>{st.padEnd(9)}</span>{m}</O>;
+    })}
+  </>
+);
+
+export const AGENT_ROWS = [
+  ["%12", "claude", "working", "Spin up a staging instance"],
+  ["%14", "codex", "working", "Inspect CLI error logs"],
+  ["%21", "cursor", "working", "Refactor session auth"],
+  ["%22", "gemini", "working", "Fix pricing fetch timeout"],
+  ["%31", "claude", "done", "Optimize route planner"],
+];
+
+export const TermAgents = ({ t }) => {
+  const c1 = "tty7 agents", c2 = "tty7 wait %21 --until waiting";
+  return (
+    <div className="t7w-term t7w-mono">
+      <P caret={t < 1.3}>{typed(c1, t, 0.4, 18)}</P>
+      {t >= 1.3 ? <AgentsTable cursor="working" /> : null}
+      {t >= 1.5 ? <P caret={!typingDone(c2, t, 1.7, 26)}>{typed(c2, t, 1.7, 26)}</P> : null}
+      {t >= 3.1 ? <O>{"%21  "}<span className="o-waiting">waiting</span></O> : null}
+      {t >= 3.1 ? <P caret /> : null}
+    </div>
+  );
+};
+
+export const TermCli = ({ t }) => {
+  const a = "tty7 split --h", b = "tty7 send %12 'claude \"fix flaky test\"' --enter";
+  const c = "tty7 wait %12 --until done", d = "tty7 capture %12 --tail 1";
+  const split = t >= 1.3;
+  return (
+    <div className={"t7w-split" + (split ? " is-split" : "")}>
+      <div className="t7w-term t7w-mono">
+        <P caret={t < 1.3}>{typed(a, t, 0.4, 18)}</P>
+        {t >= 1.3 ? <O c="o-dim">%12</O> : null}
+        {t >= 1.5 ? <P caret={!typingDone(b, t, 1.6, 30)}>{typed(b, t, 1.6, 30)}</P> : null}
+        {t >= 3.3 ? <P caret={t >= 3.3 && t < 6.4 && typingDone(c, t, 3.5, 26)}>{typed(c, t, 3.5, 26)}</P> : null}
+        {t >= 6.5 ? <P caret={!typingDone(d, t, 6.6, 26)}>{typed(d, t, 6.6, 26)}</P> : null}
+        {t >= 7.7 ? <O c="o-done-ok">✓ Patched warmup() race · 214 passed</O> : null}
+        {t >= 7.7 ? <P caret /> : null}
+      </div>
+      {split ? (
+        <div className="t7w-term t7w-mono t7w-pane2">
+          <P caret={t < 3.2}>{t >= 3.2 ? "claude \"fix flaky test\"" : ""}</P>
+          {t >= 3.7 ? <O c="o-claude">✻ Reading cache_test.rs</O> : null}
+          {t >= 4.6 ? <O c="o-claude">✻ Running cargo test ×20</O> : null}
+          {t >= 5.6 ? <O c="o-done-ok">✓ Found race in warmup()</O> : null}
+          {t >= 6.3 ? <O c="o-done-ok">✓ Patched warmup() race · 214 passed</O> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+export const COMPLETIONS = [
+  ["checkout", "Switch branches or restore working tree files"],
+  ["cherry-pick", "Apply the changes introduced by existing commits"],
+  ["cherry", "Find commits yet to be applied upstream"],
+];
+
+export const TermPrompt = ({ t }) => {
+  const menu = t >= 1.8 && t < 3.6;
+  const sel = t < 2.4 ? 0 : t < 3.0 ? 1 : 0;
+  const accepted = t >= 4.5, ran = t >= 5.3;
+  let line;
+  if (t < 3.6) line = <>{typed("git ch", t, 0.4, 12)}{!menu && t >= 1.0 ? <span className="o-ghost">eckout -b fix/pricing</span> : null}</>;
+  else if (!accepted) line = <>{"git checkout "}{t >= 3.8 ? <span className="o-ghost">-b fix/pricing</span> : null}</>;
+  else line = <><b className="o-cmd">git</b> <span>checkout</span> <span className="o-flag">-b</span> <span className="o-arg">fix/pricing</span></>;
+  return (
+    <div className="t7w-term t7w-mono">
+      <P>cargo test --quiet</P>
+      <O c="o-dim">test result: ok. 214 passed; 0 failed</O>
+      <div className="t7w-anchor">
+        <P caret={!ran}>{line}</P>
+        {menu ? (
+          <div className="t7w-pop t7w-complete">
+            {COMPLETIONS.map(([n, d], i) => (
+              <div className={"t7w-crow" + (i === sel ? " is-sel" : "")} key={n}><span className="n">{n}</span><span className="d">{d}</span></div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {ran ? <O>{"Switched to a new branch 'fix/pricing'"}</O> : null}
+      {ran ? <P br="fix/pricing" caret /> : null}
+    </div>
+  );
+};
+
+export const PAL = {
+  Terminals: [["claude", "Spin up a staging instance", "atlas-api"], ["codex", "Inspect CLI error logs", "atlas-api"], ["cursor", "Refactor session auth", "northwind  ·  feat/session-auth"]],
+  Actions: [["Split Right", "⌘D"], ["Zoom Pane", "⇧⌘↩"], ["New Worktree Tab…", ""]],
+  Sessions: [["claude", "Handle empty daily summaries", "atlas-api  ·  12m ago"], ["codex", "Add export endpoints", "atlas-api  ·  Yesterday"], ["claude", "Summarize benchmark results", "research  ·  Last week"]],
+};
+
+export const Palette = ({ t }) => {
+  const q = typed("summ", t, 2.2, 7).toLowerCase();
+  const m = (s) => !q || s.toLowerCase().includes(q);
+  const groups = [
+    ["Terminals", PAL.Terminals.filter((x) => m(x[1]))],
+    ["Actions", PAL.Actions.filter((x) => m(x[0]))],
+    ["Sessions", PAL.Sessions.filter((x) => m(x[1]))],
+  ].filter(([, xs]) => xs.length);
+  if (q) groups.sort((x, y) => (x[0] === "Sessions" ? -1 : y[0] === "Sessions" ? 1 : 0));
+  let i = 0;
+  return (
+    <div className="t7w-pop t7w-palette">
+      <div className="t7w-pinput">
+        <Search />
+        {q ? <span>{q}<span className="t7w-caret" /></span> : <span className="ph"><span className="t7w-caret" />Search tabs, sessions, hosts and actions</span>}
+      </div>
+      <div className="t7w-scopes">{["All", "Actions", "Terminals", "Sessions", "Hosts"].map((s) => <span key={s} className={s === "All" ? "is-on" : ""}>{s}</span>)}</div>
+      <div className="t7w-presults">
+        {groups.map(([name, xs]) => (
+          <div key={name}>
+            <div className="t7w-pgroup">{name}</div>
+            {xs.map((x) => {
+              const sel = i++ === 0;
+              return name === "Actions" ? (
+                <div className={"t7w-prow" + (sel ? " is-sel" : "")} key={x[0]}><span className="t7w-glyph is-shell">{"›"}</span><span className="grow">{hl(x[0], q)}</span><span className="t7w-kbd-plain">{x[1]}</span></div>
+              ) : (
+                <div className={"t7w-prow" + (sel ? " is-sel" : "")} key={x[1]}><Glyph a={x[0]} /><span className="grow">{hl(x[1], q)}</span><span className="meta">{x[2]}</span></div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export const TermResumed = ({ t, t0, extra }) => (
+  <div className="t7w-term t7w-mono">
+    <P>{t >= t0 ? "claude --resume 3f9c2a" : ""}</P>
+    {t >= t0 + 0.5 ? <O c="o-claude">✻ Resuming “Handle empty daily summaries”</O> : null}
+    {t >= t0 + 1.2 ? <O c="o-dim">  Read report_service.py · 3 edits pending</O> : null}
+    {t >= t0 + 1.9 ? <O c="o-claude">✻ Running pytest tests/test_report_service.py</O> : null}
+    {extra}
+  </div>
+);
+
+export const TermSearch = ({ t }) => (t < 4.1
+  ? (
+    <div className="t7w-term t7w-mono">
+      <P>tty7 agents</P>
+      <AgentsTable cursor="waiting" />
+      <P caret />
+    </div>
+  )
+  : <TermResumed t={t} t0={4.1} />);
+
+export const TermPersist = ({ t }) => (
+  <TermResumed t={9} t0={0} extra={<>
+    {t >= 4.6 ? <O c="o-done-ok">✓ 18 passed · empty summaries return EMPTY_SUMMARY</O> : null}
+    {t >= 5.2 ? <O c="o-claude">⏺ Done. 3 files changed, +41 −6</O> : null}
+  </>} />
+);
+
+export const PERSIST_PANES = [["claude", "Handle empty daily summaries"], ["claude", "Spin up a staging instance"], ["codex", "Inspect CLI error logs"], ["gemini", "Fix pricing fetch timeout"]];
+
+
+
+ok-323
