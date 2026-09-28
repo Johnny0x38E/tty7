@@ -1,105 +1,592 @@
 ---
 title: "tty7"
-sidebarTitle: "Introduction"
 description: "A terminal workbench: persistent sessions, remote work, agents."
-mode: "wide"
+mode: "custom"
 ---
 
-<Frame>
-  <video autoPlay muted loop playsInline controls poster="/images/tour-poster.webp" src="/images/tour.mp4" aria-label="A one-minute tour of tty7: agents across repos, one agent driving another, the prompt editor, diffs, dragging panes, and sessions that outlive the window" />
-</Frame>
+{/* Mirrors CLIAgent::accent_rgb / icon_path: a solid brand disc with the
+   agent's own mark masked in white on top, as tab_strip.rs avatar_disc draws it. */}
+export const AGENTS = {
+  claude: { name: "Claude Code", c: "#D97757" },
+  codex: { name: "Codex", c: "#000000", edge: true },
+  gemini: { name: "Gemini", c: "#4285F4" },
+  cursor: { name: "Cursor", c: "#9AA0A6" },
+  opencode: { name: "OpenCode", c: "#6E56CF" },
+  copilot: { name: "Copilot", c: "#8957E5" },
+};
 
-tty7 is a terminal you can leave running. Close the window, reboot the machine,
-walk to a different laptop — the shells you started are still there, and so are
-the coding agents you left working in them.
+export const GROUPS = [
+  { name: "atlas-api", meta: "main", items: [
+    { a: "claude", t: "Spin up a staging instance", s: "working" },
+    { a: "codex", t: "Inspect CLI error logs", s: "working" },
+  ] },
+  { name: "northwind", meta: "", items: [
+    { a: "cursor", t: "Refactor session auth", b: "feat/session-auth", s: "waiting" },
+    { a: "gemini", t: "Fix pricing fetch timeout", b: "fix/pricing-fetch-timeout", s: "working" },
+  ] },
+  { name: "orbit", meta: "main  ·  +104 −12", items: [
+    { shell: true, t: "~/code/orbit", on: true },
+    { a: "claude", t: "Optimize route planner" },
+  ] },
+  { name: "lumen-web", meta: "main  ·  +259 −191", items: [
+    { a: "copilot", t: "Backtest search ranking" },
+  ] },
+];
 
-It is written in Rust, renders on the GPU through Zed's
-[gpui](https://github.com/zed-industries/zed), and parses VT with Alacritty's
-terminal core. In practice that means roughly twice the throughput of Alacritty,
-Ghostty, or Kitty on a big `cat`, and a frame rate that does not fall over when
-something floods the screen.
+export const Glyph = ({ a, shell }) => shell
+  ? <span className="t7w-glyph is-shell">{">_"}</span>
+  : <span className={"t7w-glyph" + (AGENTS[a].edge ? " is-edge" : "")} style={{ background: AGENTS[a].c }} title={AGENTS[a].name}>
+      <span className="t7w-mark" style={{ WebkitMaskImage: "url(/images/agents/" + a + ".svg)", maskImage: "url(/images/agents/" + a + ".svg)" }} />
+    </span>;
 
-## What makes it different
+export const Row = ({ it }) => (
+  <div className={"t7w-row" + (it.b ? " is-tall" : "") + (it.on ? " is-on" : "")}>
+    <Glyph a={it.a} shell={it.shell} />
+    <div className="t7w-rtext">
+      <span>{it.t}</span>
+      {it.b ? <span className="t7w-branch">{it.b}</span> : null}
+    </div>
+    {it.s ? <span className={"t7w-dot is-" + it.s} /> : null}
+  </div>
+);
 
-<CardGroup cols={2}>
-  <Card title="Sessions that outlive the app" icon="power-off" href="/getting-started/concepts">
-    A background server owns your shells, not the window. Quit tty7 and your
-    builds keep building. No tmux to learn or configure.
-  </Card>
-  <Card title="Editor-grade input" icon="keyboard" href="/terminal/prompt">
-    Ghost suggestions from your history, tab completion that explains each flag,
-    syntax highlighting, click-to-place-caret, real multi-line editing.
-  </Card>
-  <Card title="Agent-aware" icon="robot" href="/agents/overview">
-    25 coding CLIs are recognised on sight. Per-pane status dots, notifications
-    when one needs you, git context, and session resume after a reboot.
-  </Card>
-  <Card title="Remote work that feels local" icon="server" href="/remote/workspaces">
-    A native Rust SSH stack with profiles, SFTP, and port forwarding — plus
-    remote workspaces where files, repos, and panes all stay on the far machine.
-  </Card>
-  <Card title="Git where you are looking" icon="code-branch" href="/git/source-control">
-    Branch and diff counts on every sidebar row, a source control panel, a diff
-    overlay, and worktrees in one dialog.
-  </Card>
-  <Card title="Scriptable" icon="terminal" href="/cli/overview">
-    A bundled `tty7` CLI that opens panes, sends keys, reads screens, and blocks
-    until an agent needs you — so scripts and agents can drive the workbench.
-  </Card>
-</CardGroup>
+export const Group = ({ g }) => (
+  <div className="t7w-group">
+    <div className="t7w-ghead"><b>{g.name}</b><span>{g.meta}</span></div>
+    {g.items.map((it) => <Row key={it.t} it={it} />)}
+  </div>
+);
 
-## Start here
+export const Search = () => (
+  <svg width="11" height="11" viewBox="0 0 12 12" style={{ flexShrink: 0 }}>
+    <circle cx="5" cy="5" r="3.9" fill="none" stroke="var(--w-a35)" strokeWidth="1.2" />
+    <path d="M8 8l2.8 2.8" stroke="var(--w-a35)" strokeWidth="1.2" strokeLinecap="round" />
+  </svg>
+);
 
-<Steps>
-  <Step title="Install it">
-    Native builds for macOS, Windows, and Linux.
-    [Installation →](/getting-started/installation)
-  </Step>
-  <Step title="Set it up">
-    Five minutes of settings that pay for themselves.
-    [First launch →](/getting-started/first-launch)
-  </Step>
-  <Step title="Learn the three words">
-    Workspace, tab, pane — and the server underneath them.
-    [Core concepts →](/getting-started/concepts)
-  </Step>
-</Steps>
+export const Check = () => (
+  <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="var(--w-green)" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+);
 
-## How fast, exactly
+export const Cross = () => (
+  <svg width="12" height="12" viewBox="0 0 12 12"><path d="M3.5 3.5l5 5M8.5 3.5l-5 5" fill="none" stroke="var(--w-red)" strokeWidth="1.4" strokeLinecap="round" /></svg>
+);
 
-Same machine, same day, same 155×40 grid — Apple M1 Pro, macOS 26.3.1,
-five-run averages.
+export const State = ({ s }) => (
+  <span className="t7w-ck">{s === "ok" ? <Check /> : s === "fail" ? <Cross /> : <span className="t7w-spin" />}</span>
+);
 
-| | **tty7** | Alacritty | Ghostty | Kitty |
-|---|---:|---:|---:|---:|
-| Plaintext I/O — 11 MB `cat` <sub>(lower is better)</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
-| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher is better)</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |
-| Cold-launch memory | 116 MB <sup>1</sup> | 105 MB | 128 MB | 130 MB |
+export const CHECKS = [["lint", "ok", "18s"], ["typecheck", "ok", "41s"], ["test (py3.12)", "run", "2m"], ["build image", "ok", "1m 12s"]];
+export const PRS = [
+  ["Add export endpoints", "#214  ·  Merged 1d ago", "ok"],
+  ["Refactor session auth", "#228  ·  feat/session-auth  ·  Draft", "run"],
+  ["Fix pricing fetch timeout", "#229  ·  1 check failing", "fail"],
+];
 
-<sub><sup>1</sup> GUI 105 MB plus the persistent server at 11 MB.</sub>
+export const Inspector = () => (
+  <aside className="t7w-ins">
+    <div className="t7w-bar"><span>Info</span><span>Files</span><span>Changes</span><span className="is-on">PR</span></div>
+    <div className="t7w-pr">
+      <div className="t7w-prhead">
+        <div className="t7w-meta"><span>#231</span><span>·</span><span>Open</span><span className="grow" /><span>12m ago</span></div>
+        <div className="t7w-prtitle">Handle empty daily summaries</div>
+        <div className="t7w-prbranch"><b>fix/report-daily-summary</b> → main</div>
+        <div className="t7w-practs"><span className="t7w-merge">Squash and merge</span><span className="note">Waiting on 1 check</span></div>
+      </div>
+      <div className="t7w-sect">
+        <div className="t7w-shead"><b>Checks</b><span>3 of 4 passed</span></div>
+        {CHECKS.map(([n, s, t]) => (
+          <div className="t7w-item" key={n}><State s={s} /><span className="grow">{n}</span><span className="dim">{t}</span></div>
+        ))}
+      </div>
+      <div className="t7w-sect">
+        <div className="t7w-shead"><b>Reviews</b></div>
+        <div className="t7w-item"><span className="t7w-avatar">M</span><span className="grow">mara</span><span className="dim" style={{ color: "var(--w-green)" }}>Approved</span></div>
+        <div className="t7w-item"><span className="t7w-avatar">J</span><span className="grow">jonas</span><span className="dim">Requested</span></div>
+      </div>
+      <div className="t7w-sect">
+        <div className="t7w-shead"><b>Pull requests</b></div>
+        {PRS.map(([t, m, s]) => (
+          <div className="t7w-pritem" key={t}><State s={s} /><div><span className="t">{t}</span><span className="m">{m}</span></div></div>
+        ))}
+      </div>
+    </div>
+  </aside>
+);
 
-The methodology and a one-command reproduction live in
-[`scripts/bench/`](https://github.com/l0ng-ai/tty7/tree/main/scripts/bench).
+{/* The hero demo. Five chapters after the promo storyboard
+   (videos/tty7-promo/STORYBOARD.md), each a pure function of the seconds t
+   since it began, so any frame can be drawn directly and a click can jump
+   to any chapter. */}
 
-Three decisions account for most of it:
+export const CHAPTERS = [
+  { key: "agents", label: "Every agent", d: 7.5 },
+  { key: "cli", label: "Agents drive it", d: 9.5 },
+  { key: "prompt", label: "Editor prompt", d: 7.5 },
+  { key: "search", label: "⌘P everything", d: 8 },
+  { key: "persist", label: "Quit, keep running", d: 7.5 },
+];
 
-- **The PTY is read at device speed** and parsed in large batches, off the
-  render path — so drawing never throttles reading.
-- **The hot paths are lock-free.** A big `cat` never waits on the renderer.
-- **The server buffers up to 16 MiB** ahead of the window before backpressure
-  applies, which is enough that a flood finishes writing while the window is
-  still catching up.
+export const typed = (s, t, t0, cps = 22) => (t < t0 ? "" : s.slice(0, Math.floor((t - t0) * cps)));
+export const typingDone = (s, t, t0, cps = 22) => t >= t0 + s.length / cps;
+export const hl = (s, q) => {
+  const i = q ? s.toLowerCase().indexOf(q) : -1;
+  return i < 0 ? s : <>{s.slice(0, i)}<mark>{s.slice(i, i + q.length)}</mark>{s.slice(i + q.length)}</>;
+};
 
-## Getting help
+export const P = ({ br = "main", caret, children }) => (
+  <div className="t7w-prompt">
+    <span className="p-arrow">→</span><span className="p-dir">orbit</span><span className="p-br">{br}</span><span className="p-dirty">●</span>
+    <span className="p-cmd">{children}{caret ? <span className="t7w-caret" /> : null}</span>
+  </div>
+);
 
-<CardGroup cols={3}>
-  <Card title="Discord" icon="discord" href="https://discord.gg/s3dethqz2V">
-    Ask a question, show what you built.
-  </Card>
-  <Card title="Issues" icon="github" href="https://github.com/l0ng-ai/tty7/issues">
-    Bugs and feature requests.
-  </Card>
-  <Card title="Changelog" icon="list" href="https://github.com/l0ng-ai/tty7/blob/main/CHANGELOG.md">
-    Everything that shipped, release by release.
-  </Card>
-</CardGroup>
+export const O = ({ c = "", children }) => <div className={"t7w-out " + c}>{children}</div>;
+
+{/* Sidebar for a frame: the base groups plus whatever the chapter changed. */}
+export const sidebar = (ch, t) => {
+  const g = GROUPS.map((x) => ({ ...x, items: x.items.map((it) => ({ ...it })) }));
+  const find = (title) => g.flatMap((x) => x.items).find((it) => it.t === title);
+  if (ch === 0) find("Refactor session auth").s = t < 3.1 ? "working" : "waiting";
+  // A split stays in the same tab; the tab picks up the agent's status.
+  if (ch === 1 && t >= 3.2) find("~/code/orbit").s = t < 6.4 ? "working" : "done";
+  if ((ch === 3 && t >= 4.1) || ch === 4) {
+    find("~/code/orbit").on = false;
+    g[0].items.unshift({ a: "claude", t: "Handle empty daily summaries", s: ch === 4 && t >= 5.2 ? "done" : "working", on: true });
+  }
+  return g;
+};
+
+export const AgentsTable = ({ cursor }) => (
+  <>
+    <O c="o-head">{"PANE  AGENT    STATUS   MESSAGE"}</O>
+    {AGENT_ROWS.map(([p, a, s, m]) => {
+      const st = a === "cursor" ? cursor : s;
+      return <O key={p}>{p.padEnd(6)}{a.padEnd(9)}<span className={"o-" + st}>{st.padEnd(9)}</span>{m}</O>;
+    })}
+  </>
+);
+
+export const AGENT_ROWS = [
+  ["%12", "claude", "working", "Spin up a staging instance"],
+  ["%14", "codex", "working", "Inspect CLI error logs"],
+  ["%21", "cursor", "working", "Refactor session auth"],
+  ["%22", "gemini", "working", "Fix pricing fetch timeout"],
+  ["%31", "claude", "done", "Optimize route planner"],
+];
+
+export const TermAgents = ({ t }) => {
+  const c1 = "tty7 agents", c2 = "tty7 wait %21 --until waiting";
+  return (
+    <div className="t7w-term t7w-mono">
+      <P caret={t < 1.3}>{typed(c1, t, 0.4, 18)}</P>
+      {t >= 1.3 ? <AgentsTable cursor="working" /> : null}
+      {t >= 1.5 ? <P caret={!typingDone(c2, t, 1.7, 26)}>{typed(c2, t, 1.7, 26)}</P> : null}
+      {t >= 3.1 ? <O>{"%21  "}<span className="o-waiting">waiting</span></O> : null}
+      {t >= 3.1 ? <P caret /> : null}
+    </div>
+  );
+};
+
+export const TermCli = ({ t }) => {
+  const a = "tty7 split --h", b = "tty7 send %12 'claude \"fix flaky test\"' --enter";
+  const c = "tty7 wait %12 --until done", d = "tty7 capture %12 --tail 1";
+  const split = t >= 1.3;
+  return (
+    <div className={"t7w-split" + (split ? " is-split" : "")}>
+      <div className="t7w-term t7w-mono">
+        <P caret={t < 1.3}>{typed(a, t, 0.4, 18)}</P>
+        {t >= 1.3 ? <O c="o-dim">%12</O> : null}
+        {t >= 1.5 ? <P caret={!typingDone(b, t, 1.6, 30)}>{typed(b, t, 1.6, 30)}</P> : null}
+        {t >= 3.3 ? <P caret={t >= 3.3 && t < 6.4 && typingDone(c, t, 3.5, 26)}>{typed(c, t, 3.5, 26)}</P> : null}
+        {t >= 6.5 ? <P caret={!typingDone(d, t, 6.6, 26)}>{typed(d, t, 6.6, 26)}</P> : null}
+        {t >= 7.7 ? <O c="o-done-ok">✓ Patched warmup() race · 214 passed</O> : null}
+        {t >= 7.7 ? <P caret /> : null}
+      </div>
+      {split ? (
+        <div className="t7w-term t7w-mono t7w-pane2">
+          <P caret={t < 3.2}>{t >= 3.2 ? "claude \"fix flaky test\"" : ""}</P>
+          {t >= 3.7 ? <O c="o-claude">✻ Reading cache_test.rs</O> : null}
+          {t >= 4.6 ? <O c="o-claude">✻ Running cargo test ×20</O> : null}
+          {t >= 5.6 ? <O c="o-done-ok">✓ Found race in warmup()</O> : null}
+          {t >= 6.3 ? <O c="o-done-ok">✓ Patched warmup() race · 214 passed</O> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+export const COMPLETIONS = [
+  ["checkout", "Switch branches or restore working tree files"],
+  ["cherry-pick", "Apply the changes introduced by existing commits"],
+  ["cherry", "Find commits yet to be applied upstream"],
+];
+
+export const TermPrompt = ({ t }) => {
+  const menu = t >= 1.8 && t < 3.6;
+  const sel = t < 2.4 ? 0 : t < 3.0 ? 1 : 0;
+  const accepted = t >= 4.5, ran = t >= 5.3;
+  let line;
+  if (t < 3.6) line = <>{typed("git ch", t, 0.4, 12)}{!menu && t >= 1.0 ? <span className="o-ghost">eckout -b fix/pricing</span> : null}</>;
+  else if (!accepted) line = <>{"git checkout "}{t >= 3.8 ? <span className="o-ghost">-b fix/pricing</span> : null}</>;
+  else line = <><b className="o-cmd">git</b> <span>checkout</span> <span className="o-flag">-b</span> <span className="o-arg">fix/pricing</span></>;
+  return (
+    <div className="t7w-term t7w-mono">
+      <P>cargo test --quiet</P>
+      <O c="o-dim">test result: ok. 214 passed; 0 failed</O>
+      <div className="t7w-anchor">
+        <P caret={!ran}>{line}</P>
+        {menu ? (
+          <div className="t7w-pop t7w-complete">
+            {COMPLETIONS.map(([n, d], i) => (
+              <div className={"t7w-crow" + (i === sel ? " is-sel" : "")} key={n}><span className="n">{n}</span><span className="d">{d}</span></div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {ran ? <O>{"Switched to a new branch 'fix/pricing'"}</O> : null}
+      {ran ? <P br="fix/pricing" caret /> : null}
+    </div>
+  );
+};
+
+export const PAL = {
+  Terminals: [["claude", "Spin up a staging instance", "atlas-api"], ["codex", "Inspect CLI error logs", "atlas-api"], ["cursor", "Refactor session auth", "northwind  ·  feat/session-auth"]],
+  Actions: [["Split Right", "⌘D"], ["Zoom Pane", "⇧⌘↩"], ["New Worktree Tab…", ""]],
+  Sessions: [["claude", "Handle empty daily summaries", "atlas-api  ·  12m ago"], ["codex", "Add export endpoints", "atlas-api  ·  Yesterday"], ["claude", "Summarize benchmark results", "research  ·  Last week"]],
+};
+
+export const Palette = ({ t }) => {
+  const q = typed("summ", t, 2.2, 7).toLowerCase();
+  const m = (s) => !q || s.toLowerCase().includes(q);
+  const groups = [
+    ["Terminals", PAL.Terminals.filter((x) => m(x[1]))],
+    ["Actions", PAL.Actions.filter((x) => m(x[0]))],
+    ["Sessions", PAL.Sessions.filter((x) => m(x[1]))],
+  ].filter(([, xs]) => xs.length);
+  if (q) groups.sort((x, y) => (x[0] === "Sessions" ? -1 : y[0] === "Sessions" ? 1 : 0));
+  let i = 0;
+  return (
+    <div className="t7w-pop t7w-palette">
+      <div className="t7w-pinput">
+        <Search />
+        {q ? <span>{q}<span className="t7w-caret" /></span> : <span className="ph"><span className="t7w-caret" />Search tabs, sessions, hosts and actions</span>}
+      </div>
+      <div className="t7w-scopes">{["All", "Actions", "Terminals", "Sessions", "Hosts"].map((s) => <span key={s} className={s === "All" ? "is-on" : ""}>{s}</span>)}</div>
+      <div className="t7w-presults">
+        {groups.map(([name, xs]) => (
+          <div key={name}>
+            <div className="t7w-pgroup">{name}</div>
+            {xs.map((x) => {
+              const sel = i++ === 0;
+              return name === "Actions" ? (
+                <div className={"t7w-prow" + (sel ? " is-sel" : "")} key={x[0]}><span className="t7w-glyph is-shell">{"›"}</span><span className="grow">{hl(x[0], q)}</span><span className="t7w-kbd-plain">{x[1]}</span></div>
+              ) : (
+                <div className={"t7w-prow" + (sel ? " is-sel" : "")} key={x[1]}><Glyph a={x[0]} /><span className="grow">{hl(x[1], q)}</span><span className="meta">{x[2]}</span></div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export const TermResumed = ({ t, t0, extra }) => (
+  <div className="t7w-term t7w-mono">
+    <P>{t >= t0 ? "claude --resume 3f9c2a" : ""}</P>
+    {t >= t0 + 0.5 ? <O c="o-claude">✻ Resuming “Handle empty daily summaries”</O> : null}
+    {t >= t0 + 1.2 ? <O c="o-dim">  Read report_service.py · 3 edits pending</O> : null}
+    {t >= t0 + 1.9 ? <O c="o-claude">✻ Running pytest tests/test_report_service.py</O> : null}
+    {extra}
+  </div>
+);
+
+export const TermSearch = ({ t }) => (t < 4.1
+  ? (
+    <div className="t7w-term t7w-mono">
+      <P>tty7 agents</P>
+      <AgentsTable cursor="waiting" />
+      <P caret />
+    </div>
+  )
+  : <TermResumed t={t} t0={4.1} />);
+
+export const TermPersist = ({ t }) => (
+  <TermResumed t={9} t0={0} extra={<>
+    {t >= 4.6 ? <O c="o-done-ok">✓ 18 passed · empty summaries return EMPTY_SUMMARY</O> : null}
+    {t >= 5.2 ? <O c="o-claude">⏺ Done. 3 files changed, +41 −6</O> : null}
+  </>} />
+);
+
+export const PERSIST_PANES = [["claude", "Handle empty daily summaries"], ["claude", "Spin up a staging instance"], ["codex", "Inspect CLI error logs"], ["gemini", "Fix pricing fetch timeout"]];
+
+export const Frame = ({ ch, t }) => {
+  const k = CHAPTERS[ch].key;
+  const groups = sidebar(ch, t);
+  const title = (k === "search" && t >= 4.1) || k === "persist" ? "Handle empty daily summaries" : "~/code/orbit";
+  const gone = k === "persist" && t >= 0.9 && t < 3.7;
+  const palOpen = k === "search" && t >= 0.7 && t < 4.0;
+  const toast = k === "agents" && t >= 3.2 && t < 6.9;
+  return (
+    <div className="t7w-stagebox">
+      <div className={"t7w" + (gone ? " is-gone" : "")} aria-hidden="true">
+        <div className="t7w-lights"><span /><span /><span /></div>
+        <aside className="t7w-sb">
+          <div className="t7w-bar">
+            <span className="t7w-iconbtn"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M5.5 1v9M1 5.5h9" stroke="var(--w-a45)" strokeWidth="1.2" strokeLinecap="round" /></svg></span>
+          </div>
+          <div className="t7w-sbtop">
+            <div className="t7w-ws"><span className="t7w-ws-init">W</span><span>work</span></div>
+            <div className="t7w-search"><Search /><span>Search</span></div>
+          </div>
+          <div className="t7w-groups">{groups.map((g) => <Group key={g.name} g={g} />)}</div>
+        </aside>
+        <main className="t7w-main">
+          <div className="t7w-bar">
+            <div className={"t7w-pal" + (k === "search" && t >= 0.35 && t < 0.7 ? " is-press" : "")}><Search /><span>{title}</span><span className="t7w-kbd">⌘P</span></div>
+          </div>
+          {k === "agents" ? <TermAgents t={t} /> : k === "cli" ? <TermCli t={t} /> : k === "prompt" ? <TermPrompt t={t} /> : k === "search" ? <TermSearch t={t} /> : <TermPersist t={t} />}
+        </main>
+        <Inspector />
+        {palOpen ? <div className="t7w-scrim" /> : null}
+        {palOpen ? <Palette t={t} /> : null}
+        {toast ? (
+          <div className="t7w-toast">
+            <img src="/logo/logo.svg" alt="" />
+            <div><b>Cursor</b><span>needs your permission…</span><span className="sub">northwind · Refactor session auth</span></div>
+          </div>
+        ) : null}
+      </div>
+      {k === "persist" && t >= 1.1 && t < 3.8 ? (
+        <div className="t7w-afterlife">
+          <div className="t7w-al-title">Window closed. The server kept going.</div>
+          {PERSIST_PANES.map(([a, s]) => (
+            <div className="t7w-al-row" key={s}><Glyph a={a} /><span>{s}</span><span className="t7w-dot is-working" /></div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+export const Demo = () => {
+  const [st, setSt] = useState({ ch: 0, t: 0 });
+  // Mintlify documents useState and useEffect in MDX, so the mutable clock
+  // and the element handle live in state rather than refs.
+  const [c0] = useState(() => ({ ch: 0, start: 0, visible: true, last: 0, paused: 0 }));
+  const [el, setEl] = useState(null);
+  useEffect(() => {
+    const c = c0;
+    c.start = performance.now();
+    let raf = 0;
+    const tick = (now) => {
+      raf = requestAnimationFrame(tick);
+      if (!c.visible || document.hidden) { c.start = now - c.paused; return; }
+      let t = (now - c.start) / 1000;
+      if (t >= CHAPTERS[c.ch].d) { c.ch = (c.ch + 1) % CHAPTERS.length; c.start = now; t = 0; }
+      c.paused = now - c.start;
+      if (now - c.last < 33) return;
+      c.last = now;
+      setSt({ ch: c.ch, t });
+    };
+    c.paused = 0;
+    raf = requestAnimationFrame(tick);
+    const io = new IntersectionObserver(([e]) => { c.visible = e.isIntersecting; }, { threshold: 0.05 });
+    if (el) io.observe(el);
+    return () => { cancelAnimationFrame(raf); io.disconnect(); };
+  }, [el]);
+  const go = (i) => {
+    const c = c0;
+    c.ch = i; c.start = performance.now(); c.paused = 0;
+    setSt({ ch: i, t: 0 });
+  };
+  const cur = CHAPTERS[st.ch];
+  return (
+    <div className="t7h-demo" ref={setEl}>
+      <Frame ch={st.ch} t={st.t} />
+      <div className="t7h-chapters" role="tablist" aria-label="tty7 demo">
+        {CHAPTERS.map((c, i) => (
+          <button key={c.key} role="tab" aria-selected={i === st.ch} className={"t7h-chapter" + (i === st.ch ? " is-on" : "")} onClick={() => go(i)}>
+            <span className="t7h-chapter-bar"><span style={{ width: (i === st.ch ? Math.min(1, st.t / cur.d) * 100 : i < st.ch ? 100 : 0) + "%" }} /></span>
+            <span className="t7h-chapter-label">{c.label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="t7h-chapter-now">{cur.label}</div>
+    </div>
+  );
+};
+
+export const Ico = ({ d }) => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-text)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
+);
+
+export const FEATURES = [
+  { t: "Sessions that outlive the app", href: "/getting-started/concepts",
+    d: "M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0",
+    p: "A background server owns your shells, not the window. Quit tty7 and your builds keep building. No tmux to learn or configure." },
+  { t: "Editor-grade input", href: "/terminal/prompt",
+    d: "M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM7 10h.01M11 10h.01M15 10h.01M8 14h8",
+    p: "Ghost suggestions from your history, tab completion that explains each flag, syntax highlighting, click-to-place caret, real multi-line editing." },
+  { t: "Agent-aware", href: "/agents/overview",
+    d: "M8 8h8a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3zM12 4v4M9.5 13h.01M14.5 13h.01",
+    p: "26 coding CLIs recognised on sight. Per-pane status dots, a notification when one needs you, and session resume after a reboot." },
+  { t: "Remote work that feels local", href: "/remote/workspaces",
+    d: "M5 4h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM5 13h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2zM7 7.5h.01M7 16.5h.01",
+    p: "A native Rust SSH stack with profiles, SFTP, and port forwarding — plus remote workspaces where files, repos, and panes stay on the far machine." },
+  { t: "Git where you are looking", href: "/git/source-control",
+    d: "M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM6 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM18 5a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM6 7v10M18 9v1a4 4 0 0 1-4 4H6",
+    p: "Branch and diff counts on every sidebar row, a source control panel, a diff overlay, GitHub issues and pull requests, and worktrees in one dialog." },
+  { t: "Scriptable", href: "/cli/overview",
+    d: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM7 9l3 3-3 3M13 15h4",
+    p: "A bundled tty7 CLI that opens panes, sends keys, reads screens, and blocks until an agent needs you — so scripts and agents can drive the workbench." },
+];
+
+export const Features = () => (
+  <div className="t7h-grid">
+    {FEATURES.map((f) => (
+      <a className="t7h-card" href={f.href} key={f.t}>
+        <span className="t7h-card-icon"><Ico d={f.d} /></span>
+        <h3>{f.t}</h3>
+        <p>{f.p}</p>
+      </a>
+    ))}
+  </div>
+);
+
+export const Tick = () => (
+  <span className="t7h-tick"><svg width="10" height="10" viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="var(--primary-text)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg></span>
+);
+
+export const AgentPanel = () => (
+  <div className="t7h-panel" role="img" aria-label="Agent tabs in the tty7 sidebar, each with a live status dot, and a notification that Cursor is waiting for input">
+    {GROUPS.slice(0, 2).map((g) => <Group key={g.name} g={g} />)}
+    <div className="t7h-toast">
+      <Glyph a="cursor" />
+      <div><b>Cursor needs your permission…</b><span>northwind · Refactor session auth</span></div>
+      <span className="t7w-kbd">⌘1</span>
+    </div>
+  </div>
+);
+
+export const Bench = ({ title, hint, big, unit, rows, max }) => (
+  <div className="t7h-bench">
+    <div className="t7h-bench-top"><h3>{title}</h3><span>{hint}</span></div>
+    <div className="t7h-big">{big}<small>{unit}</small></div>
+    <div className="t7h-bars">
+      {rows.map(([n, v]) => (
+        <div className={"t7h-barrow" + (n === "tty7" ? " is-us" : "")} key={n}>
+          <span>{n}</span>
+          <span className="t7h-track"><span className="t7h-fill" style={{ display: "block", width: (v / max) * 100 + "%" }} /></span>
+          <span className="v">{v} {unit}</span>
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+export const STEPS = [
+  { t: "Install it", p: "Native builds for macOS, Windows, and Linux. No runtime to install first.", href: "/getting-started/installation", l: "Installation" },
+  { t: "Set it up", p: "Five minutes of settings that pay for themselves: shell, font, theme, keys.", href: "/getting-started/first-launch", l: "First launch" },
+  { t: "Learn the three words", p: "Workspace, tab, pane — and the server underneath them that keeps it all alive.", href: "/getting-started/concepts", l: "Core concepts" },
+];
+
+export const Home = () => (
+  <div className="t7h">
+    <section className="t7h-hero">
+      <div className="t7h-wrap">
+        <span className="t7h-eyebrow"><i />Open source · written in Rust</span>
+        <h1>A terminal you can leave running.</h1>
+        <p className="t7h-lede">Close the window, reboot, walk to a different laptop — the shells you started are still there, and so are the coding agents you left working in them.</p>
+        <div className="t7h-ctas">
+          <a className="t7h-btn t7h-btn-primary" href="https://github.com/l0ng-ai/tty7/releases">Download tty7</a>
+          <a className="t7h-btn t7h-btn-ghost" href="/introduction">Read the docs →</a>
+        </div>
+        <div className="t7h-platforms">macOS · Windows · Linux</div>
+      </div>
+      <div className="t7h-stage"><Demo /></div>
+    </section>
+
+    <section className="t7h-section">
+      <div className="t7h-wrap">
+        <div className="t7h-kicker">What makes it different</div>
+        <h2 className="t7h-h2">A workbench, not just a window.</h2>
+        <p className="t7h-sub">Everything you reach for between commands — sessions, hosts, branches, agents — sits next to the terminal instead of in another app.</p>
+        <Features />
+      </div>
+    </section>
+
+    <section className="t7h-section">
+      <div className="t7h-wrap t7h-split">
+        <div>
+          <div className="t7h-kicker">Coding agents</div>
+          <h2 className="t7h-h2">Run five agents. Watch none of them.</h2>
+          <p className="t7h-sub">tty7 never wraps your agents — it recognises them by the command in the pane and keeps track from the outside.</p>
+          <ul className="t7h-list">
+            <li><Tick /><span><b>Status on every tab.</b> Working, waiting, done — a dot per pane, grouped by repository.</span></li>
+            <li><Tick /><span><b>Told when you're needed.</b> A notification the moment an agent blocks on you, and another when a turn finishes.</span></li>
+            <li><Tick /><span><b>Back after a reboot.</b> Agent sessions resume where they were, in the pane they were in.</span></li>
+          </ul>
+          <div className="t7h-chips">
+            {["claude", "codex", "gemini", "cursor", "opencode", "copilot"].map((a) => (
+              <span className="t7h-chip" key={a}><Glyph a={a} />{AGENTS[a].name}</span>
+            ))}
+            <a className="t7h-chip is-more" href="/agents/overview">+20 more</a>
+          </div>
+        </div>
+        <AgentPanel />
+      </div>
+    </section>
+
+    <section className="t7h-section">
+      <div className="t7h-wrap">
+        <div className="t7h-kicker">Performance</div>
+        <h2 className="t7h-h2">Roughly twice as fast where it counts.</h2>
+        <p className="t7h-sub">The PTY is read at device speed and parsed off the render path, so drawing never throttles reading — and a flood never drops the frame rate.</p>
+        <div className="t7h-stats">
+          <Bench title="Plaintext I/O, 11 MB cat" hint="lower is better" big="95" unit="ms" max={239}
+            rows={[["tty7", 95], ["Ghostty", 179], ["Kitty", 185], ["Alacritty", 239]]} />
+          <Bench title="DOOM-fire frame rate" hint="higher is better" big="888" unit="fps" max={888}
+            rows={[["tty7", 888], ["Kitty", 617], ["Ghostty", 552], ["Alacritty", 485]]} />
+        </div>
+        <p className="t7h-footnote">Apple M1 Pro, macOS 26.3.1, 155×40 grid, five-run averages. <a href="https://github.com/l0ng-ai/tty7/tree/main/scripts/bench">Reproduce it with one command →</a></p>
+      </div>
+    </section>
+
+    <section className="t7h-section">
+      <div className="t7h-wrap">
+        <div className="t7h-kicker">Start here</div>
+        <h2 className="t7h-h2">Up and running in three steps.</h2>
+        <div className="t7h-steps">
+          {STEPS.map((s, i) => (
+            <a className="t7h-card" href={s.href} key={s.t}>
+              <span className="t7h-step-n">{i + 1}</span>
+              <h3>{s.t}</h3>
+              <p>{s.p}</p>
+              <span className="t7h-more">{s.l} →</span>
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <div className="t7h-wrap">
+      <section className="t7h-end">
+        <h2 className="t7h-h2">Your shells will still be there.</h2>
+        <p className="t7h-sub">Free and open source. Native on macOS, Windows, and Linux.</p>
+        <div className="t7h-ctas">
+          <a className="t7h-btn t7h-btn-primary" href="https://github.com/l0ng-ai/tty7/releases">Download tty7</a>
+          <a className="t7h-btn t7h-btn-ghost" href="/introduction">Read the docs →</a>
+        </div>
+        <div className="t7h-end-links">
+          <a href="https://github.com/l0ng-ai/tty7">GitHub</a>
+          <a href="https://discord.gg/s3dethqz2V">Discord</a>
+          <a href="https://github.com/l0ng-ai/tty7/blob/main/CHANGELOG.md">Changelog</a>
+        </div>
+      </section>
+    </div>
+  </div>
+);
+
+<Home />

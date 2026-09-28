@@ -12,7 +12,7 @@
   "logo": {
     "light": "/logo/logo.svg",
     "dark": "/logo/logo.svg",
-    "href": "https://github.com/l0ng-ai/tty7"
+    "href": "/"
   },
   "navigation": {
     "tabs": [
@@ -22,7 +22,7 @@
           {
             "group": "Getting started",
             "pages": [
-              "index",
+              "introduction",
               "getting-started/installation",
               "getting-started/first-launch",
               "getting-started/concepts"
