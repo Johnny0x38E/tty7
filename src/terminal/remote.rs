@@ -6496,6 +6496,7 @@ mod tests {
                 cwd: None,
                 activity: 0,
                 turns: 0,
+                inferred: false,
             }))
             .encode(daemon)
             .unwrap();
@@ -6557,6 +6558,7 @@ mod tests {
             cwd: None,
             activity: 0,
             turns: 0,
+            inferred: false,
         }))
         .encode(&mut daemon_side)
         .unwrap();
@@ -6607,6 +6609,7 @@ mod tests {
             cwd: None,
             activity: 0,
             turns: 0,
+            inferred: false,
         }))
         .encode(&mut daemon_side)
         .unwrap();

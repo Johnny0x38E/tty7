@@ -6,7 +6,7 @@ use alacritty_terminal::term::TermMode;
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, EntityId, ExternalPaths, FocusHandle, Focusable,
     Font, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, WeakEntity, Window, actions, div, prelude::*, px,
+    ScrollWheelEvent, Task, WeakEntity, Window, actions, div, prelude::*, px,
 };
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -437,6 +437,10 @@ pub struct TerminalView {
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_session: (Option<String>, Option<Vec<String>>),
     agent_turn_started: Option<std::time::Instant>,
+    /// The "finished" notification for a turn that just reached `Done`,
+    /// waiting out [`AGENT_DONE_SETTLE`]. Dropped — and so never sent — when
+    /// the status moves on first.
+    pending_finish_notice: Option<Task<()>>,
     agent_was_rich: bool,
     agent_result_unread: bool,
     keep_unread_on_focus: bool,
@@ -663,6 +667,11 @@ const OPPORTUNISTIC_GIT_GAP: std::time::Duration = std::time::Duration::from_mil
 /// reaches the label, short enough that one still running is named while the
 /// wait for it is still what the reader is doing.
 const TITLE_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// How long a turn has to stay finished before it is announced. Long enough
+/// for a queued message or a `Stop` hook to start the next turn, short enough
+/// that the notification still reads as the moment the agent stopped.
+const AGENT_DONE_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// What a pane does with a title the program just set — see
 /// `TerminalView::set_title_when_settled`.
@@ -1659,6 +1668,7 @@ impl TerminalView {
             last_agent_status: None,
             last_agent_session: (None, None),
             agent_turn_started: None,
+            pending_finish_notice: None,
             agent_was_rich: false,
             agent_result_unread: false,
             keep_unread_on_focus: false,
@@ -4103,6 +4113,10 @@ impl TerminalView {
         }
         let prev = std::mem::replace(&mut self.last_agent_status, status);
         let first_sight = !std::mem::replace(&mut self.agent_status_seen, true);
+        self.pending_finish_notice = None;
+        // tty7's own conclusion, not the agent's: the user interrupted the
+        // turn, or it went silent. Neither is a result to announce.
+        let inferred = session.as_ref().is_some_and(|s| s.inferred);
 
         // A view built over a pane that already holds a finished turn sees
         // `Done` arrive from nothing, the same as a turn finishing now. If the
@@ -4139,7 +4153,7 @@ impl TerminalView {
                 // built, before its leaf was attached, never gets the blur that
                 // would clear `self.focused` — trusting the cached flag there
                 // drops the badge on the one pane the reader is not looking at.
-                self.agent_result_unread = !self.focus_handle.is_focused(window);
+                self.agent_result_unread = !inferred && !self.focus_handle.is_focused(window);
                 self.keep_unread_on_focus = false;
             }
             Some(AgentStatus::Done) => {}
@@ -4170,6 +4184,7 @@ impl TerminalView {
             Some(AgentStatus::Done)
                 if rich
                     && notify_allowed
+                    && !inferred
                     && matches!(
                         prev,
                         Some(AgentStatus::Working) | Some(AgentStatus::Waiting)
@@ -4182,7 +4197,19 @@ impl TerminalView {
                     }
                     None => t(L10nKey::NotifyTurnFinished).to_string(),
                 };
-                self.notify_pane(Some(agent_name), &body, cx);
+                // Held back briefly: a turn that ends only for the next one to
+                // start at once — a message queued while the agent worked, a
+                // `Stop` hook sending it back to work — is not finished, and
+                // announcing it would be a notification about nothing.
+                let agent_name = agent_name.to_string();
+                self.pending_finish_notice = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(AGENT_DONE_SETTLE).await;
+                    this.update(cx, |view, cx| {
+                        view.pending_finish_notice = None;
+                        view.notify_pane(Some(&agent_name), &body, cx);
+                    })
+                    .ok();
+                }));
             }
             _ => {}
         }
@@ -10466,6 +10493,7 @@ mod gpui_tests {
                 cwd: None,
                 activity: 0,
                 turns: 0,
+                inferred: false,
             }))
             .encode(daemon)
             .unwrap();
@@ -10522,6 +10550,7 @@ mod gpui_tests {
             cwd: None,
             activity: 0,
             turns: 0,
+            inferred: false,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -10589,6 +10618,7 @@ mod gpui_tests {
             cwd: None,
             activity: 0,
             turns,
+            inferred: false,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11046,6 +11076,7 @@ mod gpui_tests {
             cwd: Some(working_in.clone()),
             activity: 0,
             turns: 0,
+            inferred: false,
         }))
         .encode(&mut daemon)
         .unwrap();

@@ -42,7 +42,20 @@ fn effective_agent(agent: &str, ran_by_grok: bool) -> &str {
     if ran_by_grok { "grok" } else { agent }
 }
 
+/// The tools that stop a turn to ask the user a question: Claude's
+/// `AskUserQuestion` and Codex's `request_user_input`. Neither goes through a
+/// permission prompt, so their `PreToolUse` is the only sign the turn is now
+/// waiting on the user.
+const QUESTION_TOOLS: &[&str] = &["AskUserQuestion", "request_user_input"];
+
 fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<&'a str> {
+    // `tool-start` is not an event of its own: it fires before every tool
+    // call, and only the ones that ask the user something change the status.
+    if event == "tool-start" {
+        let payload = serde_json::from_str::<serde_json::Value>(stdin_json).ok()?;
+        let tool = payload.get("tool_name").and_then(|t| t.as_str())?;
+        return QUESTION_TOOLS.contains(&tool).then_some("question-asked");
+    }
     // Antigravity has no turn-start event, only `PreInvocation` before every
     // model call. The first call of a turn starts it; later ones are the same
     // turn still working, and must not count as new prompts. `Stop` with
@@ -892,18 +905,33 @@ fn home_dir() -> Option<PathBuf> {
 const OWNED_FILE_STEM_JSON: &str = "tty7.json";
 const OWNED_FILE_STEM_JS: &str = "tty7.js";
 
+/// `PermissionRequest` fires the moment the permission dialog opens; the
+/// `Notification` that also reports it can trail by seconds, and stays as the
+/// fallback for older Claude builds that do not know the event. A hook that
+/// prints nothing leaves the decision to the dialog. `PreToolUse` is there for
+/// `AskUserQuestion` alone (see [`QUESTION_TOOLS`]).
 const CLAUDE_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    ("PreToolUse", "tool-start"),
     ("Notification", "notification"),
     ("PostToolUse", "tool-complete"),
     ("Stop", "stop"),
     ("SessionEnd", "session-end"),
 ];
 
+/// Codex's `PermissionRequest` answered with no output falls through to its
+/// own approval prompt, so it reports the wait without deciding anything.
+/// `PostToolUse` is what takes the pane off waiting once the approved tool has
+/// run, and `PreToolUse` catches `request_user_input` (see
+/// [`QUESTION_TOOLS`]), which Codex runs without asking for approval.
 const CODEX_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    ("PreToolUse", "tool-start"),
+    ("PostToolUse", "tool-complete"),
     ("Stop", "stop"),
 ];
 
@@ -1967,6 +1995,46 @@ mod tests {
     }
 
     #[test]
+    fn tool_start_only_speaks_for_question_tools() {
+        for (agent, tool) in [
+            ("claude", "AskUserQuestion"),
+            ("codex", "request_user_input"),
+        ] {
+            let input = format!(r#"{{"tool_name":"{tool}","tool_input":{{}}}}"#);
+            assert_eq!(
+                effective_event(agent, "tool-start", &input),
+                Some("question-asked"),
+                "{agent} {tool}"
+            );
+        }
+        for input in [
+            r#"{"tool_name":"Bash"}"#,
+            r#"{"tool_name":"shell"}"#,
+            "{}",
+            "not json",
+        ] {
+            assert_eq!(
+                effective_event("claude", "tool-start", input),
+                None,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_and_codex_report_permission_prompts_first_hand() {
+        for events in [CLAUDE_HOOK_EVENTS, CODEX_HOOK_EVENTS] {
+            for (hook, sentinel) in [
+                ("PermissionRequest", "permission-request"),
+                ("PreToolUse", "tool-start"),
+                ("PostToolUse", "tool-complete"),
+            ] {
+                assert!(events.contains(&(hook, sentinel)), "{hook}");
+            }
+        }
+    }
+
+    #[test]
     fn every_installed_event_parses_as_a_sentinel_kind() {
         use crate::core::cli_agent::parse_agent_event;
 
@@ -1985,6 +2053,9 @@ mod tests {
             .chain(CURSOR_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
+            // Never sent as itself: `effective_event` turns it into a real
+            // kind or drops it (`tool_start_only_speaks_for_question_tools`).
+            .filter(|e| *e != "tool-start")
             .collect();
         events.extend([
             "prompt-submit",
