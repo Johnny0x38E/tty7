@@ -125,10 +125,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchTabActions => "Commands",
         L10nKey::SearchTabTerminals => "Terminals",
         L10nKey::SearchTabHosts => "Hosts",
+        L10nKey::SearchTabSymbols => "Symbols",
         L10nKey::SearchPlaceholderAll => "Search files, actions, terminals and hosts…",
         L10nKey::SearchPlaceholderActions => "Search commands…",
         L10nKey::SearchPlaceholderTerminals => "Search open tabs, shells and agents…",
         L10nKey::SearchPlaceholderHosts => "Search hosts, or type user@host to connect…",
+        L10nKey::SearchPlaceholderSymbols => "Go to a symbol in this file…",
+        L10nKey::SearchSymbolsNone => "No symbols in this file",
+        L10nKey::SearchSymbolsNoneHint => {
+            "Symbols are listed for Rust, Go, Python, JavaScript, TypeScript, C, C++, Java, Ruby, shell and Markdown."
+        }
         L10nKey::SearchTabFiles => "Files",
         L10nKey::SearchPlaceholderFiles => "Go to a file by name — add :line to jump to it…",
         L10nKey::SearchFilesNoRoots => "No project to search",
@@ -1179,6 +1185,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorNoFileOpen => "No file open",
         L10nKey::EditorBackToTerminal => "Back to Terminal (Esc)",
         L10nKey::EditorLnCol => "Ln {line}, Col {column}",
+        L10nKey::EditorSelections => "({n} selections)",
         L10nKey::EditorEdit => "Edit",
         L10nKey::EditorPreview => "Preview",
         L10nKey::EditorWrapOn => "Wrap: on",
@@ -1201,8 +1208,71 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorAlreadyOpen => "\"{path}\" is already open in the editor",
         L10nKey::EditorGoToLine => "Go to line",
         L10nKey::EditorGoToLineAction => "Go to Line…",
+        L10nKey::EditorGoToMatchingBracket => "Go to Matching Bracket",
+        L10nKey::EditorToggleComment => "Toggle Comment",
+        L10nKey::EditorMoveLineUp => "Move Line Up",
+        L10nKey::EditorMoveLineDown => "Move Line Down",
+        L10nKey::EditorDuplicateLine => "Duplicate Line",
+        L10nKey::EditorDeleteLine => "Delete Line",
         L10nKey::EditorCopyRelativePath => "Copy Relative Path",
+        L10nKey::EditorGitNextChange => "Go to Next Change",
+        L10nKey::EditorGitPrevChange => "Go to Previous Change",
+        L10nKey::EditorGitRevertChange => "Revert Change",
+        L10nKey::EditorGitToggleGutter => "Toggle Git Change Markers",
+        L10nKey::EditorGitPeekRevert => "Revert",
+        L10nKey::EditorGitPeekSummary => "−{removed} +{added} lines against the staged version",
+        L10nKey::EditorGitPeekAddedOnly => {
+            "These lines are new: the staged version has nothing here."
+        }
+        L10nKey::EditorGitPeekChange => "Peek Change",
+        L10nKey::EditorGitPeekKeys => "Enter reverts · Esc closes",
+        L10nKey::EditorProblemsTitle => "Problems",
+        L10nKey::EditorProblemsToggle => "Toggle Problems",
+        L10nKey::EditorProblemsNone => "No problems in the open files.",
+        L10nKey::EditorProblemsMore => "…and {n} more",
+        L10nKey::SettingsEditor => "Editor",
+        L10nKey::SettingsEditorGitGutter => "Git change markers",
+        L10nKey::SettingsEditorGitGutterDesc => {
+            "Mark lines that differ from the staged version beside the line numbers and on the scrollbar."
+        }
+        L10nKey::SettingsEditorLsp => "Language servers",
+        L10nKey::SettingsEditorLspDesc => {
+            "Start a language server for files it knows, for errors, completion and go to definition. Only files on this machine."
+        }
+        L10nKey::SettingsEditorSoftWrap => "Wrap long lines",
+        L10nKey::SettingsEditorSoftWrapDesc => {
+            "Open files with soft wrap on. The status bar's Wrap button changes it for one file."
+        }
+        L10nKey::SettingsEditorMarkdownPreview => "Open Markdown rendered",
+        L10nKey::SettingsEditorMarkdownPreviewDesc => {
+            "Show Markdown files as a rendered preview rather than as source when they open."
+        }
+        L10nKey::SettingsSearchEditorGitGutterKeywords => {
+            "git gutter diff changes markers staged index scm vcs modified added deleted"
+        }
+        L10nKey::SettingsSearchEditorLspKeywords => {
+            "lsp language server diagnostics errors warnings completion rust-analyzer definition"
+        }
+        L10nKey::SettingsSearchEditorSoftWrapKeywords => "wrap soft wrap long lines editor",
+        L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
+            "markdown preview rendered md readme"
+        }
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
+        L10nKey::EditorGoToSymbolAction => "Go to Symbol in Editor…",
+        L10nKey::EditorNavigateBack => "Go Back",
+        L10nKey::EditorNavigateForward => "Go Forward",
+        L10nKey::EditorSplitRight => "Split Editor Right",
+        L10nKey::EditorFocusLeftGroup => "Focus Left Editor Group",
+        L10nKey::EditorFocusRightGroup => "Focus Right Editor Group",
+        L10nKey::EditorSplitSameFile => "Open in the other group — click to edit it here",
+        L10nKey::CmdEditorGoToSymbol => "Editor: Go to Symbol…",
+        L10nKey::SearchHeadingReferences => "References",
+        L10nKey::SearchSectionThisFile => "In This File",
+        L10nKey::SearchSectionProject => "Project",
+        L10nKey::SearchHeadingDefinitions => "Definitions",
+        L10nKey::CmdEditorGoBack => "Editor: Go Back",
+        L10nKey::CmdEditorGoForward => "Editor: Go Forward",
+        L10nKey::CmdEditorSplitRight => "Editor: Split Right",
         L10nKey::EditorSaveAs => "Save as",
         L10nKey::EditorSaveAsAction => "Save As…",
         L10nKey::EditorSaveAsPlaceholder => "Full path to save to",
@@ -1213,6 +1283,21 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorFileDeletedOnDisk => "This file was deleted on disk",
         L10nKey::EditorIndentSpaces => "Spaces: {n}",
         L10nKey::EditorIndentTabs => "Tab Size: {n}",
+        L10nKey::LspGoToDefinition => "Go to Definition",
+        L10nKey::LspQuickFix => "Quick Fix…",
+        L10nKey::LspFormatDocument => "Format Document",
+        L10nKey::LspRenameSymbol => "Rename symbol",
+        L10nKey::LspRenameSymbolAction => "Rename Symbol…",
+        L10nKey::LspRenamePlaceholder => "New name for {name}",
+        L10nKey::LspRenameFailed => "Could not rename {name}",
+        L10nKey::LspServerMissing => "{name} not installed",
+        L10nKey::LspServerStarting => "{name} starting…",
+        L10nKey::LspServerDown => "{name} stopped",
+        L10nKey::LspProblemsTooltip => "{errors} errors, {warnings} warnings",
+        L10nKey::SearchTabLocations => "Locations",
+        L10nKey::SearchPlaceholderLocations => "Filter the places found…",
+        L10nKey::SearchLocationsNone => "Nothing found",
+        L10nKey::LspFindReferences => "Find All References",
         L10nKey::PanelInfoTitle => "Info",
         L10nKey::PanelChangesTitle => "Changes",
         L10nKey::PanelScmTitle => "Changes",
@@ -1681,6 +1766,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdDocumentWidthTwoThirds => "Document: Two-Thirds Width",
         L10nKey::CmdToggleDocumentPreview => "Document: Toggle Markdown Preview",
         L10nKey::CmdToggleDocumentWrap => "Document: Toggle Word Wrap",
+        L10nKey::CmdEditorTransformUppercase => "Document: Transform to Uppercase",
+        L10nKey::CmdEditorTransformLowercase => "Document: Transform to Lowercase",
+        L10nKey::CmdEditorTransformTitleCase => "Document: Transform to Title Case",
+        L10nKey::CmdEditorTrimTrailingWhitespace => "Document: Trim Trailing Whitespace",
+        L10nKey::CmdEditorJoinLines => "Document: Join Lines",
+        L10nKey::CmdEditorRemoveSurroundingBrackets => "Document: Remove Surrounding Brackets",
         L10nKey::CmdGitCommit => "Git: Commit",
         L10nKey::CmdGitStageAll => "Git: Stage All Changes",
         L10nKey::CmdGitUnstageAll => "Git: Unstage All Changes",

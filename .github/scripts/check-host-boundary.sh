@@ -104,6 +104,23 @@ src/ui/code_editor.rs|std::fs::metadata
 # that copy goes through `Host`, and the one `std::fs::copy` that touches a
 # destination sits inside a branch already gated on `host.id().is_local()`.
 src/ui/file_copy.rs|std::fs::
+
+# The code editor's language servers run on this machine and only ever take a
+# local buffer: `OpenFile::local` refuses anything whose host is not local, so
+# every path `ui::lsp` holds is on this disk. It reads files a server points
+# into that are not open (to measure a column, to apply a rename to disk),
+# looks for project markers above a file (`Cargo.toml`, `package.json`, …),
+# and checks a server binary is executable. A remote workspace gets language
+# servers by running them over there, not by routing these reads.
+src/ui/lsp/editor.rs|std::fs::read_to_string
+src/ui/lsp/locations.rs|std::fs::read_to_string
+src/ui/lsp/mod.rs|std::fs::read_to_string
+src/ui/lsp/servers.rs|std::fs::metadata
+src/ui/lsp/servers.rs|std::fs::read_to_string
+# Its tests live in their own file (not a trailing `mod tests`), writing
+# fixtures into a local temp dir.
+src/ui/lsp/tests.rs|std::fs::write
+src/ui/lsp/tests.rs|.canonicalize()
 EOF
 )
 

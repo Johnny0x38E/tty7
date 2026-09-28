@@ -3376,7 +3376,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#379c56a2ffbcb9771fb12e9e2fd6cc68a725c154"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#0e7541fbcee5a6d681c0238d5d7950061da4f147"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3459,7 +3459,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#379c56a2ffbcb9771fb12e9e2fd6cc68a725c154"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#0e7541fbcee5a6d681c0238d5d7950061da4f147"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3473,7 +3473,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#379c56a2ffbcb9771fb12e9e2fd6cc68a725c154"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#0e7541fbcee5a6d681c0238d5d7950061da4f147"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9947,6 +9947,7 @@ dependencies = [
  "ksni",
  "libc",
  "log",
+ "lsp-types",
  "memchr",
  "notify 8.2.0",
  "notify-rust",

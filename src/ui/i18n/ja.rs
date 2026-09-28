@@ -126,10 +126,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchTabActions => "コマンド",
         L10nKey::SearchTabTerminals => "ターミナル",
         L10nKey::SearchTabHosts => "ホスト",
+        L10nKey::SearchTabSymbols => "シンボル",
         L10nKey::SearchPlaceholderAll => "ファイル、アクション、ターミナル、ホストを検索…",
         L10nKey::SearchPlaceholderActions => "コマンドを検索…",
         L10nKey::SearchPlaceholderTerminals => "開いているタブ、シェル、エージェントを検索…",
         L10nKey::SearchPlaceholderHosts => "ホストを検索、または user@host を入力して接続…",
+        L10nKey::SearchPlaceholderSymbols => "このファイル内のシンボルへ移動…",
+        L10nKey::SearchSymbolsNone => "このファイルにシンボルはありません",
+        L10nKey::SearchSymbolsNoneHint => {
+            "Rust、Go、Python、JavaScript、TypeScript、C、C++、Java、Ruby、シェル、Markdown のシンボルを一覧できます。"
+        }
         L10nKey::SearchTabFiles => "ファイル",
         L10nKey::SearchPlaceholderFiles => "名前でファイルに移動（:行番号 でその行へ）…",
         L10nKey::SearchFilesNoRoots => "検索するプロジェクトがありません",
@@ -1227,6 +1233,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorNoFileOpen => "開かれているファイルはありません",
         L10nKey::EditorBackToTerminal => "ターミナルに戻る (Esc)",
         L10nKey::EditorLnCol => "行 {line}, 列 {column}",
+        L10nKey::EditorSelections => "（{n} 個の選択範囲）",
         L10nKey::EditorEdit => "編集",
         L10nKey::EditorPreview => "プレビュー",
         L10nKey::EditorWrapOn => "折り返し: オン",
@@ -1249,8 +1256,69 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorAlreadyOpen => "「{path}」はすでにエディタで開かれています",
         L10nKey::EditorGoToLine => "行へ移動",
         L10nKey::EditorGoToLineAction => "行へ移動…",
+        L10nKey::EditorGoToMatchingBracket => "対応する括弧へ移動",
+        L10nKey::EditorToggleComment => "コメントの切り替え",
+        L10nKey::EditorMoveLineUp => "行を上へ移動",
+        L10nKey::EditorMoveLineDown => "行を下へ移動",
+        L10nKey::EditorDuplicateLine => "行を複製",
+        L10nKey::EditorDeleteLine => "行を削除",
         L10nKey::EditorCopyRelativePath => "相対パスをコピー",
+        L10nKey::EditorGitNextChange => "次の変更へ移動",
+        L10nKey::EditorGitPrevChange => "前の変更へ移動",
+        L10nKey::EditorGitRevertChange => "変更を元に戻す",
+        L10nKey::EditorGitToggleGutter => "Git 変更マーカーの切り替え",
+        L10nKey::EditorGitPeekRevert => "元に戻す",
+        L10nKey::EditorGitPeekSummary => "ステージ済みの版と比べて −{removed} +{added} 行",
+        L10nKey::EditorGitPeekAddedOnly => {
+            "新しく追加された行です。ステージ済みの版にはここに何もありません。"
+        }
+        L10nKey::EditorGitPeekChange => "変更をプレビュー",
+        L10nKey::EditorGitPeekKeys => "Enter で元に戻す · Esc で閉じる",
+        L10nKey::EditorProblemsTitle => "問題",
+        L10nKey::EditorProblemsToggle => "問題の表示切り替え",
+        L10nKey::EditorProblemsNone => "開いているファイルに問題はありません。",
+        L10nKey::EditorProblemsMore => "…ほか {n} 件",
+        L10nKey::SettingsEditor => "エディタ",
+        L10nKey::SettingsEditorGitGutter => "Git 変更マーカー",
+        L10nKey::SettingsEditorGitGutterDesc => {
+            "ステージ済みの版と異なる行を、行番号の横とスクロールバーに示します。"
+        }
+        L10nKey::SettingsEditorLsp => "言語サーバー",
+        L10nKey::SettingsEditorLspDesc => {
+            "対応するファイルで言語サーバーを起動し、エラー表示・補完・定義へ移動を使えるようにします。このマシン上のファイルのみ。"
+        }
+        L10nKey::SettingsEditorSoftWrap => "長い行を折り返す",
+        L10nKey::SettingsEditorSoftWrapDesc => {
+            "ファイルを折り返し表示で開きます。ステータスバーの折り返しボタンでファイルごとに切り替えられます。"
+        }
+        L10nKey::SettingsEditorMarkdownPreview => "Markdown をレンダリングして開く",
+        L10nKey::SettingsEditorMarkdownPreviewDesc => {
+            "Markdown ファイルを開いたとき、ソースではなくレンダリングしたプレビューを表示します。"
+        }
+        L10nKey::SettingsSearchEditorGitGutterKeywords => {
+            "git 変更 マーカー 差分 ステージ 変更 追加 削除 gutter diff"
+        }
+        L10nKey::SettingsSearchEditorLspKeywords => "lsp 言語サーバー 診断 エラー 警告 補完 定義",
+        L10nKey::SettingsSearchEditorSoftWrapKeywords => "折り返し 長い行 wrap",
+        L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
+            "markdown プレビュー レンダリング md"
+        }
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
+        L10nKey::EditorGoToSymbolAction => "エディタ内のシンボルへ移動…",
+        L10nKey::EditorNavigateBack => "戻る",
+        L10nKey::EditorNavigateForward => "進む",
+        L10nKey::EditorSplitRight => "エディタを右に分割",
+        L10nKey::EditorFocusLeftGroup => "左のエディタグループにフォーカス",
+        L10nKey::EditorFocusRightGroup => "右のエディタグループにフォーカス",
+        L10nKey::EditorSplitSameFile => "もう一方のグループで開いています — クリックしてここで編集",
+        L10nKey::CmdEditorGoToSymbol => "エディタ: シンボルへ移動…",
+        L10nKey::SearchHeadingReferences => "参照",
+        L10nKey::SearchSectionThisFile => "このファイル",
+        L10nKey::SearchSectionProject => "プロジェクト",
+        L10nKey::SearchHeadingDefinitions => "定義",
+        L10nKey::CmdEditorGoBack => "エディタ: 戻る",
+        L10nKey::CmdEditorGoForward => "エディタ: 進む",
+        L10nKey::CmdEditorSplitRight => "エディタ: 右に分割",
         L10nKey::EditorSaveAs => "名前を付けて保存",
         L10nKey::EditorSaveAsAction => "名前を付けて保存…",
         L10nKey::EditorSaveAsPlaceholder => "保存先のフルパス",
@@ -1261,6 +1329,21 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorFileDeletedOnDisk => "このファイルはディスク上で削除されました",
         L10nKey::EditorIndentSpaces => "スペース: {n}",
         L10nKey::EditorIndentTabs => "タブ幅: {n}",
+        L10nKey::LspGoToDefinition => "定義へ移動",
+        L10nKey::LspQuickFix => "クイックフィックス…",
+        L10nKey::LspFormatDocument => "ドキュメントのフォーマット",
+        L10nKey::LspRenameSymbol => "シンボル名を変更",
+        L10nKey::LspRenameSymbolAction => "シンボル名を変更…",
+        L10nKey::LspRenamePlaceholder => "{name} の新しい名前",
+        L10nKey::LspRenameFailed => "{name} の名前を変更できませんでした",
+        L10nKey::LspServerMissing => "{name} 未インストール",
+        L10nKey::LspServerStarting => "{name} 起動中…",
+        L10nKey::LspServerDown => "{name} 停止",
+        L10nKey::LspProblemsTooltip => "エラー {errors} 件、警告 {warnings} 件",
+        L10nKey::SearchTabLocations => "場所",
+        L10nKey::SearchPlaceholderLocations => "見つかった場所を絞り込む…",
+        L10nKey::SearchLocationsNone => "見つかりませんでした",
+        L10nKey::LspFindReferences => "すべての参照を検索",
         L10nKey::PanelInfoTitle => "情報",
         L10nKey::PanelChangesTitle => "変更",
         L10nKey::PanelScmTitle => "変更",
@@ -1726,6 +1809,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdDocumentWidthTwoThirds => "ドキュメント: 幅3分の2",
         L10nKey::CmdToggleDocumentPreview => "ドキュメント: Markdown プレビューを切り替え",
         L10nKey::CmdToggleDocumentWrap => "ドキュメント: 折り返しを切り替え",
+        L10nKey::CmdEditorTransformUppercase => "ドキュメント: 大文字に変換",
+        L10nKey::CmdEditorTransformLowercase => "ドキュメント: 小文字に変換",
+        L10nKey::CmdEditorTransformTitleCase => "ドキュメント: 単語の先頭を大文字に変換",
+        L10nKey::CmdEditorTrimTrailingWhitespace => "ドキュメント: 末尾の空白を削除",
+        L10nKey::CmdEditorJoinLines => "ドキュメント: 行を結合",
+        L10nKey::CmdEditorRemoveSurroundingBrackets => "ドキュメント: 外側の括弧を削除",
         L10nKey::CmdGitCommit => "Git: コミット",
         L10nKey::CmdGitStageAll => "Git: すべての変更をステージ",
         L10nKey::CmdGitUnstageAll => "Git: すべてのステージを取り消す",

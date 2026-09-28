@@ -76,6 +76,9 @@ tempfile = "3"
 # userinfo and man-page names back out.
 url = "2"
 percent-encoding = "2"
+# The code editor's language-server client (`ui::lsp`). The same version
+# gpui-component's LSP hooks take their types from.
+lsp-types = { version = "0.97.0", features = ["proposed"] }
 
 # The code editor's file loading and saving (`ui::editor_text`). `encoding_rs`
 # decodes legacy-encoded text (GB18030, Windows-1252) and writes it back in the
