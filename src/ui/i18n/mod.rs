@@ -1225,6 +1225,7 @@ l10n_keys! {
     SidebarDeleteGroup,
     SidebarDropToPin,
     TabContextCloseTab,
+    TerminalContextClear,
     TabContextCloseTabsBelow,
     TabContextMarkUnread,
     TabContextHibernate,

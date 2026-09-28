@@ -7375,10 +7375,9 @@ impl Render for TerminalView {
                     )
                     .separator()
                     .menu(t(L10nKey::AppMenuFind), Box::new(FindInTerminal))
-                    .menu(
-                        t(L10nKey::AppMenuClearScrollback),
-                        Box::new(ClearScrollback),
-                    );
+                    // Inside the terminal, what gets cleared goes without
+                    // saying; the menu bar keeps the full "Clear Scrollback".
+                    .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback));
 
                 // `fork_label` is tty7-core's capability probe, and core has no
                 // locale table — take the answer, not its English wording.

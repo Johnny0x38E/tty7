@@ -2049,6 +2049,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarDeleteGroup => "Delete Group",
         L10nKey::SidebarDropToPin => "Drop here to pin",
         L10nKey::TabContextCloseTab => "Close Tab",
+        L10nKey::TerminalContextClear => "Clear",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
         L10nKey::AppAgentHooksOpFailed => "Failed: {error}",
         L10nKey::AppMenuEnterFullscreen => "Enter Full Screen",
