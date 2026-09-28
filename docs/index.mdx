@@ -167,36 +167,38 @@ export const AgentsTable = ({ cursor }) => (
   </>
 );
 
+{/* Pane ids spell their "%" as \u0025: the hosted Mintlify build percent-decodes
+   the page before parsing it, so a literal "%22" turned into a quote and broke the page. */}
 export const AGENT_ROWS = [
-  ["%12", "claude", "working", "Spin up a staging instance"],
-  ["%14", "codex", "working", "Inspect CLI error logs"],
-  ["%21", "cursor", "working", "Refactor session auth"],
-  ["%22", "gemini", "working", "Fix pricing fetch timeout"],
-  ["%31", "claude", "done", "Optimize route planner"],
+  ["\u002512", "claude", "working", "Spin up a staging instance"],
+  ["\u002514", "codex", "working", "Inspect CLI error logs"],
+  ["\u002521", "cursor", "working", "Refactor session auth"],
+  ["\u002522", "gemini", "working", "Fix pricing fetch timeout"],
+  ["\u002531", "claude", "done", "Optimize route planner"],
 ];
 
 export const TermAgents = ({ t }) => {
-  const c1 = "tty7 agents", c2 = "tty7 wait %21 --until waiting";
+  const c1 = "tty7 agents", c2 = "tty7 wait \u002521 --until waiting";
   return (
     <div className="t7w-term t7w-mono">
       <P caret={t < 1.3}>{typed(c1, t, 0.4, 18)}</P>
       {t >= 1.3 ? <AgentsTable cursor="working" /> : null}
       {t >= 1.5 ? <P caret={!typingDone(c2, t, 1.7, 26)}>{typed(c2, t, 1.7, 26)}</P> : null}
-      {t >= 3.1 ? <O>{"%21  "}<span className="o-waiting">waiting</span></O> : null}
+      {t >= 3.1 ? <O>{"\u002521  "}<span className="o-waiting">waiting</span></O> : null}
       {t >= 3.1 ? <P caret /> : null}
     </div>
   );
 };
 
 export const TermCli = ({ t }) => {
-  const a = "tty7 split --h", b = "tty7 send %12 'claude \"fix flaky test\"' --enter";
-  const c = "tty7 wait %12 --until done", d = "tty7 capture %12 --tail 1";
+  const a = "tty7 split --h", b = "tty7 send \u002512 'claude \"fix flaky test\"' --enter";
+  const c = "tty7 wait \u002512 --until done", d = "tty7 capture \u002512 --tail 1";
   const split = t >= 1.3;
   return (
     <div className={"t7w-split" + (split ? " is-split" : "")}>
       <div className="t7w-term t7w-mono">
         <P caret={t < 1.3}>{typed(a, t, 0.4, 18)}</P>
-        {t >= 1.3 ? <O c="o-dim">%12</O> : null}
+        {t >= 1.3 ? <O c="o-dim">{"\u002512"}</O> : null}
         {t >= 1.5 ? <P caret={!typingDone(b, t, 1.6, 30)}>{typed(b, t, 1.6, 30)}</P> : null}
         {t >= 3.3 ? <P caret={t >= 3.3 && t < 6.4 && typingDone(c, t, 3.5, 26)}>{typed(c, t, 3.5, 26)}</P> : null}
         {t >= 6.5 ? <P caret={!typingDone(d, t, 6.6, 26)}>{typed(d, t, 6.6, 26)}</P> : null}
