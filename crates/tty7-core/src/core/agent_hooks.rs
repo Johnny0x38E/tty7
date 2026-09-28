@@ -63,9 +63,10 @@ fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<
             return None;
         }
     }
-    // Qoder and CodeBuddy also emit SessionStart after compacting the active
-    // turn. Preserve its status until a real turn or session boundary arrives.
-    if matches!(agent, "qodercli" | "codebuddy")
+    // Qoder, its China build and CodeBuddy also emit SessionStart after
+    // compacting the active turn. Preserve its status until a real turn or
+    // session boundary arrives.
+    if matches!(agent, "qodercli" | "qoderclicn" | "codebuddy")
         && event == "session-start"
         && let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdin_json)
         && payload.get("source").and_then(|value| value.as_str()) == Some("compact")
@@ -321,10 +322,11 @@ pub enum HookAgent {
     Cursor,
     PrimeAgent,
     Antigravity,
+    QoderCLICn,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 19] = [
+    pub const ALL: [HookAgent; 20] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -339,6 +341,7 @@ impl HookAgent {
         HookAgent::Goose,
         HookAgent::Kimi,
         HookAgent::QoderCLI,
+        HookAgent::QoderCLICn,
         HookAgent::Crush,
         HookAgent::CodeBuddy,
         HookAgent::Cursor,
@@ -369,6 +372,7 @@ impl HookAgent {
             CLIAgent::Goose => Some(HookAgent::Goose),
             CLIAgent::Kimi => Some(HookAgent::Kimi),
             CLIAgent::QoderCLI => Some(HookAgent::QoderCLI),
+            CLIAgent::QoderCLICn => Some(HookAgent::QoderCLICn),
             CLIAgent::Crush => Some(HookAgent::Crush),
             CLIAgent::CodeBuddy => Some(HookAgent::CodeBuddy),
             CLIAgent::Cursor => Some(HookAgent::Cursor),
@@ -392,7 +396,7 @@ impl HookAgent {
             HookAgent::Gemini => Some(GEMINI_HOOK_EVENTS),
             HookAgent::Droid => Some(DROID_HOOK_EVENTS),
             HookAgent::Qwen => Some(QWEN_HOOK_EVENTS),
-            HookAgent::QoderCLI => Some(QODER_HOOK_EVENTS),
+            HookAgent::QoderCLI | HookAgent::QoderCLICn => Some(QODER_HOOK_EVENTS),
             HookAgent::Crush => Some(CRUSH_HOOK_EVENTS),
             HookAgent::CodeBuddy => Some(CODEBUDDY_HOOK_EVENTS),
             HookAgent::Cursor => Some(CURSOR_HOOK_EVENTS),
@@ -459,6 +463,7 @@ impl HookAgent {
             HookAgent::Crush => "crush",
             HookAgent::CodeBuddy => "codebuddy",
             HookAgent::Cursor => "cursor",
+            HookAgent::QoderCLICn => "qoderclicn",
         }
     }
 
@@ -483,6 +488,7 @@ impl HookAgent {
             HookAgent::Crush => "Crush",
             HookAgent::CodeBuddy => "CodeBuddy",
             HookAgent::Cursor => "Cursor CLI",
+            HookAgent::QoderCLICn => "Qoder CN CLI",
         }
     }
 
@@ -520,6 +526,7 @@ impl HookAgent {
             }
             HookAgent::Kimi => target.kimi_config_path(),
             HookAgent::QoderCLI => target.qoder_settings_path(),
+            HookAgent::QoderCLICn => target.qoder_cn_settings_path(),
             HookAgent::Crush => target.crush_settings_path(),
             HookAgent::CodeBuddy => target.codebuddy_settings_path(),
             // The user-level file; Cursor merges it under any project one.
@@ -623,6 +630,22 @@ impl<'a> HookTarget<'a> {
             return PathBuf::from(dir).join("settings.json");
         }
         self.under_home(&[".qoder", "settings.json"])
+    }
+
+    /// The China build keeps its settings in `~/.qoder-cn`. It resolves the
+    /// directory the same way the global build does, under a `-cn` name:
+    /// `QODERCN_CONFIG_DIR` wins, otherwise the home falls back through
+    /// `QODERCN_CLI_HOME` and `GEMINI_CLI_HOME` before the user's own, with
+    /// `.qoder-cn` as the directory name. Only the first is honoured here —
+    /// local-only, like every other override, so a local env var must not
+    /// redirect a remote machine's hooks.
+    fn qoder_cn_settings_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("QODERCN_CONFIG_DIR").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("settings.json");
+        }
+        self.under_home(&[".qoder-cn", "settings.json"])
     }
 
     /// The global `crush.json`. Crush resolves it through `CRUSH_GLOBAL_CONFIG`
@@ -1495,6 +1518,7 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::Droid
         | HookAgent::Qwen
         | HookAgent::QoderCLI
+        | HookAgent::QoderCLICn
         | HookAgent::Crush
         | HookAgent::CodeBuddy
         | HookAgent::Cursor
@@ -1994,6 +2018,7 @@ mod tests {
             ),
             (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
             (HookAgent::QoderCLI, "/home/me/.qoder/settings.json"),
+            (HookAgent::QoderCLICn, "/home/me/.qoder-cn/settings.json"),
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
             (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
             (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
@@ -2022,6 +2047,7 @@ mod tests {
             HookAgent::Goose,
             HookAgent::Kimi,
             HookAgent::QoderCLI,
+            HookAgent::QoderCLICn,
             HookAgent::Crush,
             HookAgent::CodeBuddy,
             HookAgent::Cursor,
@@ -2713,6 +2739,7 @@ mod tests {
             ),
             (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
             (HookAgent::QoderCLI, "/home/me/.qoder/settings.json"),
+            (HookAgent::QoderCLICn, "/home/me/.qoder-cn/settings.json"),
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
             (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
             (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
@@ -3158,6 +3185,102 @@ mod tests {
             std::fs::read_to_string(settings)
                 .unwrap()
                 .contains("agent-hook qodercli")
+        );
+        assert_eq!(
+            uninstall_hooks(&target, agent).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
+        for path in [settings, untouched] {
+            let actual: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(actual, user_config, "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn qoder_cn_config_dir_controls_local_hook_lifecycle() {
+        const CASE_ENV: &str = "TTY7_TEST_QODER_CN_CONFIG_CASE";
+        const ROOT_ENV: &str = "TTY7_TEST_QODER_CN_CONFIG_ROOT";
+        let Ok(case) = std::env::var(CASE_ENV) else {
+            for case in ["override", "empty", "unset"] {
+                let sandbox = tempfile::tempdir().unwrap();
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .args([
+                        "--exact",
+                        "core::agent_hooks::tests::qoder_cn_config_dir_controls_local_hook_lifecycle",
+                        "--nocapture",
+                    ])
+                    .env(CASE_ENV, case)
+                    .env(ROOT_ENV, sandbox.path());
+                match case {
+                    "override" => {
+                        child.env("QODERCN_CONFIG_DIR", sandbox.path().join("custom config"))
+                    }
+                    "empty" => child.env("QODERCN_CONFIG_DIR", ""),
+                    _ => child.env_remove("QODERCN_CONFIG_DIR"),
+                };
+                let output = crate::core::proc::output_within(
+                    crate::core::proc::hide_console(&mut child),
+                    std::time::Duration::from_secs(30),
+                )
+                .expect("run the isolated Qoder CN hook test");
+                assert!(
+                    output.status.success(),
+                    "{case}:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            return;
+        };
+
+        let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
+        let host = local_host();
+        let target = HookTarget {
+            host: &*host,
+            home: root.join("home"),
+            exe: std::env::current_exe().unwrap(),
+        };
+        let default_settings = target.home.join(".qoder-cn").join("settings.json");
+        let custom_settings = root.join("custom config").join("settings.json");
+        let (settings, untouched) = if case == "override" {
+            (&custom_settings, &default_settings)
+        } else {
+            (&default_settings, &custom_settings)
+        };
+        let user_config = serde_json::json!({
+            "model": "qoder-cn-test",
+            "hooks": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "echo user-hook" }] }]
+            }
+        });
+        for path in [settings, untouched] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, user_config.to_string()).unwrap();
+        }
+
+        let agent = HookAgent::QoderCLICn;
+        assert_eq!(agent.target_path(&target), *settings);
+        let remote_host = FakeRemote::shared();
+        let remote = HookTarget::remote(&*remote_host, PathBuf::from("/home/me"));
+        assert_eq!(
+            agent.target_path(&remote),
+            PathBuf::from("/home/me/.qoder-cn/settings.json"),
+            "a local override must not redirect remote hooks"
+        );
+
+        assert_eq!(hooks_state(&target, agent), HooksState::NotInstalled);
+        assert_eq!(
+            install_hooks(&target, agent).unwrap(),
+            HookOutcome::Installed
+        );
+        assert_eq!(hooks_state(&target, agent), HooksState::Installed);
+        assert!(
+            std::fs::read_to_string(settings)
+                .unwrap()
+                .contains("agent-hook qoderclicn")
         );
         assert_eq!(
             uninstall_hooks(&target, agent).unwrap(),

@@ -25,6 +25,7 @@ fn cli_agent(agent: HookAgent) -> crate::core::cli_agent::CLIAgent {
         HookAgent::Goose => C::Goose,
         HookAgent::Kimi => C::Kimi,
         HookAgent::QoderCLI => C::QoderCLI,
+        HookAgent::QoderCLICn => C::QoderCLICn,
         HookAgent::Crush => C::Crush,
         HookAgent::CodeBuddy => C::CodeBuddy,
         HookAgent::Cursor => C::Cursor,

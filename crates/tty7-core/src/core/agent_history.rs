@@ -70,6 +70,8 @@ pub struct Roots {
     pub droid: PathBuf,
     /// `$QODER_CONFIG_DIR`, else `~/.qoder`.
     pub qoder: PathBuf,
+    /// `$QODERCN_CONFIG_DIR`, else `~/.qoder-cn`.
+    pub qoder_cn: PathBuf,
     /// `$CODEBUDDY_CONFIG_DIR`, else `~/.codebuddy`.
     pub codebuddy: PathBuf,
     /// `$CURSOR_CONFIG_DIR`, else `~/.cursor`.
@@ -95,6 +97,7 @@ impl Roots {
             copilot: home.join(".copilot"),
             droid: home.join(".factory"),
             qoder: home.join(".qoder"),
+            qoder_cn: home.join(".qoder-cn"),
             codebuddy: home.join(".codebuddy"),
             cursor: home.join(".cursor"),
             opencode: home.join(".local").join("share").join("opencode"),
@@ -142,6 +145,9 @@ impl Roots {
         if let Some(dir) = var("QODER_CONFIG_DIR") {
             roots.qoder = dir;
         }
+        if let Some(dir) = var("QODERCN_CONFIG_DIR") {
+            roots.qoder_cn = dir;
+        }
         if let Some(dir) = var("CODEBUDDY_CONFIG_DIR") {
             roots.codebuddy = dir;
         }
@@ -172,6 +178,10 @@ pub fn scan(roots: &Roots, known_dirs: &[PathBuf]) -> Vec<PastSession> {
     files.extend(claude_files(
         &roots.qoder.join("projects"),
         CLIAgent::QoderCLI,
+    ));
+    files.extend(claude_files(
+        &roots.qoder_cn.join("projects"),
+        CLIAgent::QoderCLICn,
     ));
     files.extend(claude_files(
         &roots.codebuddy.join("projects"),
@@ -305,7 +315,7 @@ fn read(file: &Found) -> Option<PastSession> {
     let updated = unix(file.modified);
     match file.agent {
         CLIAgent::Codex => read_codex(&file.path, updated),
-        CLIAgent::Claude | CLIAgent::QoderCLI => {
+        CLIAgent::Claude | CLIAgent::QoderCLI | CLIAgent::QoderCLICn => {
             let id = file.path.file_stem()?.to_str()?.to_string();
             let (head, tail) = ends(&file.path, file.len).ok()?;
             let mut s = parse_claude(id, &head, &tail, updated)?;
@@ -1875,6 +1885,7 @@ mod tests {
         };
         let claude_like = user("hello");
         write(".qoder/projects/-q/q1.jsonl", claude_like);
+        write(".qoder-cn/projects/-q/q2.jsonl", user("hello cn"));
         write(
             ".qwen/projects/q/chats/w1.jsonl",
             line(json!({"type": "user", "message": {"parts": [{"text": "hi qwen"}]}})),
@@ -1933,6 +1944,7 @@ mod tests {
                 (CLIAgent::Droid, "d1".into(), "hi droid".into()),
                 (CLIAgent::Pi, "p1".into(), "hi pi".into()),
                 (CLIAgent::QoderCLI, "q1".into(), "hello".into()),
+                (CLIAgent::QoderCLICn, "q2".into(), "hello cn".into()),
                 (
                     CLIAgent::OpenCode,
                     "ses_default".into(),

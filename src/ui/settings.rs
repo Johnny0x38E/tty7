@@ -613,6 +613,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Agents,
+            title: SettingsAgentQoderCn,
+            keywords: SettingsSearchQoderCnKeywords,
+        },
+        SearchEntry {
+            section: Agents,
             title: SettingsAgentCrush,
             keywords: SettingsSearchCrushKeywords,
         },

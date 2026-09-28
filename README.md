@@ -69,7 +69,7 @@ after a reboot. **Fork** needs both — the agent's own fork command, and the ho
 that tells tty7 which session to fork.
 
 <details>
-<summary>The full support matrix, all twenty-five</summary>
+<summary>The full support matrix, all twenty-six</summary>
 
 | Agent | Detected | Status · resume | Fork |
 |---|:-:|:-:|:-:|
@@ -84,6 +84,7 @@ that tells tty7 which session to fork.
 | **Qwen Code** | ✓ | ✓ | ✓ |
 | **Goose** | ✓ | ✓ | ✓ |
 | **Qoder CLI** | ✓ | ✓ | ✓ |
+| **Qoder CN CLI** | ✓ | ✓ | ✓ |
 | **CodeBuddy** | ✓ | ✓ | ✓ |
 | **Gemini** | ✓ | ✓ | |
 | **Copilot** | ✓ | ✓ | |
