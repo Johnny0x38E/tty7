@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Position, RopeExt as _, TabSize};
-use gpui_component::menu::ContextMenuExt as _;
+use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -224,9 +224,12 @@ impl TabCode {
 }
 
 /// What a question about unsaved files was standing in the way of.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum AfterUnsaved {
     CloseTab(TabId),
+    /// Take these files out of that tab's strip — Close Others and Close to
+    /// the Right.
+    CloseFiles(TabId, Vec<BufferId>),
     ClosePane,
     CloseWindow,
     Quit,
@@ -603,6 +606,66 @@ fn is_program(path: &Path) -> bool {
                 | "lnk"
         )
     }
+}
+
+/// A file a browser renders rather than showing its source.
+fn opens_in_browser(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "html" | "htm" | "xhtml" | "svg"
+        )
+    })
+}
+
+/// Opens a local file in the default web browser. On macOS that is asked
+/// for by name: what `.html` is associated with is as often an editor. The
+/// other desktops go by the association.
+fn open_in_browser(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = default_browser_bundle_id() {
+        std::process::Command::new("open")
+            .arg("-b")
+            .arg(bundle)
+            .arg(path)
+            .spawn()?;
+        return Ok(());
+    }
+    crate::terminal::view::open_file_path(path)
+}
+
+/// The app that handles `https:` links — the default browser.
+#[cfg(target_os = "macos")]
+fn default_browser_bundle_id() -> Option<String> {
+    use core_foundation::base::TCFType as _;
+    use core_foundation::string::{CFString, CFStringRef};
+
+    #[link(name = "CoreServices", kind = "framework")]
+    unsafe extern "C" {
+        fn LSCopyDefaultHandlerForURLScheme(scheme: CFStringRef) -> CFStringRef;
+    }
+    let scheme = CFString::new("https");
+    let handler = unsafe { LSCopyDefaultHandlerForURLScheme(scheme.as_concrete_TypeRef()) };
+    // A Copy function: the string is ours to release, which the wrapper does.
+    (!handler.is_null()).then(|| unsafe { CFString::wrap_under_create_rule(handler) }.to_string())
+}
+
+/// The lines a selection covers, 1-based and inclusive. One that ends at the
+/// very start of a line — a whole-line selection — does not take that line.
+fn selected_lines(
+    text: &gpui_component::input::Rope,
+    range: std::ops::Range<usize>,
+) -> Option<(usize, usize)> {
+    if range.is_empty() {
+        return None;
+    }
+    let start = text.offset_to_point(range.start);
+    let end = text.offset_to_point(range.end);
+    let last = match end.column == 0 && end.row > start.row {
+        true => end.row - 1,
+        false => end.row,
+    };
+    Some((start.row + 1, last + 1))
 }
 
 /// What a watcher saw at a path: the file's modification time, or that it
@@ -1044,8 +1107,18 @@ impl Tty7App {
             );
             return;
         }
-        // The OS association can fail to spawn like any other opener (#542).
-        if let Err(e) = crate::terminal::view::open_file_path(path) {
+        Self::open_with(path, crate::terminal::view::open_file_path, window, cx);
+    }
+
+    /// Runs one of the desktop openers on a local file, and says so when it
+    /// fails to spawn — as any opener can (#542).
+    fn open_with(
+        path: &Path,
+        opener: fn(&Path) -> std::io::Result<()>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(e) = opener(path) {
             log::warn!("failed to open {}: {e}", path.display());
             window.push_notification(
                 crate::ui::host_ops::failure(
@@ -1168,6 +1241,9 @@ impl Tty7App {
                 .replaceable(true)
                 .folding(true)
                 .soft_wrap(wrap)
+                // Ours is drawn by `editor_body_menu`, like every other menu
+                // in the window; the built-in one is a native OS menu.
+                .context_menu(false)
                 .default_value(text)
         });
         let id = input.entity_id();
@@ -1922,6 +1998,231 @@ impl Tty7App {
         .detach();
     }
 
+    /// Closes the file with this buffer in the front tab's strip, wherever
+    /// it has moved to since a menu was built for it.
+    fn editor_close_buffer(&mut self, id: BufferId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pos) = self
+            .tab_code()
+            .and_then(|c| c.files.iter().position(|f| *f == id))
+        {
+            self.editor_close_file(pos, window, cx);
+        }
+    }
+
+    /// Closes several files in the front tab's strip, asking once about the
+    /// ones whose edits would be lost with them — not those another tab still
+    /// shows.
+    fn editor_close_buffers(
+        &mut self,
+        ids: Vec<BufferId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_ix = self.active;
+        let Some(tab) = self.tabs.get(tab_ix).map(|t| t.tree_id.get()) else {
+            return;
+        };
+        let unsaved: Vec<BufferId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.buffer(*id).is_some_and(|f| f.dirty) && self.buffer_refs(*id) == 1)
+            .collect();
+        if self.editor_guard_unsaved(
+            unsaved,
+            AfterUnsaved::CloseFiles(tab, ids.clone()),
+            window,
+            cx,
+        ) {
+            return;
+        }
+        for id in ids {
+            self.editor_remove_from_tab(tab_ix, id, cx);
+        }
+    }
+
+    /// Types `@path` into the running agent's prompt, with the selected
+    /// lines after it when there are any.
+    fn editor_attach_to_agent(&mut self, id: BufferId, cx: &mut Context<Self>) {
+        let Some(f) = self.buffer(id).filter(|f| f.untitled.is_none()) else {
+            return;
+        };
+        let state = f.input.read(cx);
+        let suffix = match selected_lines(state.text(), state.selected_range()) {
+            Some((a, b)) if a == b => format!("#L{a}"),
+            Some((a, b)) => format!("#L{a}-{b}"),
+            None => String::new(),
+        };
+        let path = f.path.clone();
+        self.attach_path_to_agent(&path, &suffix, cx);
+    }
+
+    /// Right-click in the text. Edits dispatch to the editor itself, so each
+    /// row shows the chord that does the same thing.
+    fn editor_body_menu(
+        menu: PopupMenu,
+        app: &gpui::WeakEntity<Self>,
+        id: BufferId,
+        cx: &gpui::App,
+    ) -> PopupMenu {
+        use gpui_component::input as edit;
+        let Some(this) = app.upgrade() else {
+            return menu;
+        };
+        let this = this.read(cx);
+        let Some(f) = this.buffer(id) else {
+            return menu;
+        };
+        let state = f.input.read(cx);
+        let selected = !state.selected_range().is_empty();
+        let mut menu = menu.min_w(px(220.)).action_context(state.focus_handle(cx));
+        if f.untitled.is_none() {
+            menu = menu
+                .item(
+                    PopupMenuItem::new(t(L10nKey::FileTreeContextAttachAgent)).on_click({
+                        let app = app.clone();
+                        move |_, _window, cx| {
+                            let _ = app.update(cx, |this, cx| this.editor_attach_to_agent(id, cx));
+                        }
+                    }),
+                )
+                .separator();
+        }
+        let menu = menu
+            .menu(t(L10nKey::AppMenuUndo), Box::new(edit::Undo))
+            .menu(t(L10nKey::AppMenuRedo), Box::new(edit::Redo))
+            .separator()
+            .menu_with_disabled(t(L10nKey::AppMenuCut), Box::new(edit::Cut), !selected)
+            .menu_with_disabled(t(L10nKey::AppMenuCopy), Box::new(edit::Copy), !selected)
+            .menu_with_disabled(
+                t(L10nKey::AppMenuPaste),
+                Box::new(edit::Paste),
+                cx.read_from_clipboard().is_none(),
+            )
+            .menu(t(L10nKey::AppMenuSelectAll), Box::new(edit::SelectAll))
+            .separator()
+            .menu(t(L10nKey::AppMenuFind), Box::new(edit::Search))
+            .menu(
+                t(L10nKey::EditorGoToLineAction),
+                Box::new(crate::core::actions::EditorGoToLine),
+            );
+        this.editor_file_menu_items(menu, id, app, cx)
+    }
+
+    /// Right-click on a file in the header's strip.
+    fn editor_tab_menu(
+        menu: PopupMenu,
+        app: &gpui::WeakEntity<Self>,
+        pos: usize,
+        cx: &gpui::App,
+    ) -> PopupMenu {
+        let Some(this) = app.upgrade() else {
+            return menu;
+        };
+        let this = this.read(cx);
+        let Some(files) = this.tab_code().map(|c| c.files.clone()) else {
+            return menu;
+        };
+        let Some(&id) = files.get(pos) else {
+            return menu;
+        };
+        let others: Vec<BufferId> = files.iter().copied().filter(|f| *f != id).collect();
+        let right = files[pos + 1..].to_vec();
+        let close = |label: L10nKey, ids: Vec<BufferId>| {
+            let app = app.clone();
+            PopupMenuItem::new(t(label))
+                .disabled(ids.is_empty())
+                .on_click(move |_, window, cx| {
+                    let ids = ids.clone();
+                    let _ = app.update(cx, |this, cx| this.editor_close_buffers(ids, window, cx));
+                })
+        };
+        let menu = menu
+            .min_w(px(220.))
+            .item(
+                PopupMenuItem::new(t(L10nKey::TabContextCloseTab)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.editor_close_buffer(id, window, cx));
+                    }
+                }),
+            )
+            .item(close(L10nKey::AppMenuCloseOtherTabs, others))
+            .item(close(L10nKey::AppMenuCloseTabsRight, right));
+        this.editor_file_menu_items(menu, id, app, cx)
+    }
+
+    /// What both menus offer for the file as a whole: open it outside tty7,
+    /// show it in its folder, copy where it is. Nothing for a file that has
+    /// never been saved, since it is not anywhere yet.
+    fn editor_file_menu_items(
+        &self,
+        menu: PopupMenu,
+        id: BufferId,
+        app: &gpui::WeakEntity<Self>,
+        cx: &gpui::App,
+    ) -> PopupMenu {
+        let Some(f) = self.buffer(id).filter(|f| f.untitled.is_none()) else {
+            return menu;
+        };
+        let path = f.path.clone();
+        // Only this machine's desktop can open or show a file, and only a
+        // file that is on this machine — the same rule as the file tree.
+        let local = f.host.id().is_local();
+        let mut menu = menu.separator();
+        if local && self.can_spawn_locally(cx) && !is_program(&path) {
+            let browser = opens_in_browser(&path);
+            let label = match browser {
+                true => t(L10nKey::PanelOpenInBrowser),
+                false => t(L10nKey::AppMenuOpenLinkWithDefaultApp),
+            };
+            let opener: fn(&Path) -> std::io::Result<()> = match browser {
+                true => open_in_browser,
+                false => crate::terminal::view::open_file_path,
+            };
+            menu = menu.item(PopupMenuItem::new(label).on_click({
+                let app = app.clone();
+                let path = path.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |_, cx| Self::open_with(&path, opener, window, cx));
+                }
+            }));
+        }
+        if local {
+            menu = menu.item(
+                PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({
+                    let path = path.clone();
+                    move |_, _window, cx| {
+                        cx.reveal_path(&crate::ui::path_display::native_separators(&path));
+                    }
+                }),
+            );
+        }
+        let copy = |label: L10nKey, text: String| {
+            PopupMenuItem::new(t(label)).on_click(move |_, _window, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+            })
+        };
+        // A remote host's paths are already spelled its own way; only one on
+        // this machine is re-spelled with its separators.
+        let full = match local {
+            true => crate::ui::path_display::native_separators(&path)
+                .display()
+                .to_string(),
+            false => path.display().to_string(),
+        };
+        menu = menu.item(copy(L10nKey::FileTreeContextCopyPath, full));
+        if let Some(rel) = self.path_under_tree_root(&path) {
+            let rel = match local {
+                true => crate::ui::path_display::native_separators(&rel)
+                    .display()
+                    .to_string(),
+                false => rel.display().to_string(),
+            };
+            menu = menu.item(copy(L10nKey::EditorCopyRelativePath, rel));
+        }
+        menu
+    }
+
     pub(crate) fn editor_close_active_if_focused(
         &mut self,
         window: &mut Window,
@@ -2100,6 +2401,13 @@ impl Tty7App {
             AfterUnsaved::CloseTab(tab) => {
                 if let Some(ix) = self.tab_index_of(tab) {
                     self.close_tab(ix, window, cx);
+                }
+            }
+            AfterUnsaved::CloseFiles(tab, ids) => {
+                if let Some(ix) = self.tab_index_of(tab) {
+                    for id in ids {
+                        self.editor_remove_from_tab(ix, id, cx);
+                    }
                 }
             }
             AfterUnsaved::ClosePane => self.close_pane_after_unsaved(window, cx),
@@ -2549,11 +2857,21 @@ impl Tty7App {
             }
             Some(f) => {
                 let input = f.input.clone();
-                Input::new(&input)
-                    .appearance(false)
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(cx.theme().mono_font_size)
+                let id = f.id();
+                let app = cx.entity().downgrade();
+                div()
+                    .id("editor-body")
                     .size_full()
+                    .child(
+                        Input::new(&input)
+                            .appearance(false)
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(cx.theme().mono_font_size)
+                            .size_full(),
+                    )
+                    .context_menu(move |menu, _window, cx| {
+                        Self::editor_body_menu(menu, &app, id, cx)
+                    })
                     .into_any_element()
             }
         };
@@ -2849,6 +3167,10 @@ impl Tty7App {
                     this.editor_close_file(pos, window, cx);
                 }),
             )
+            .context_menu({
+                let app = cx.entity().downgrade();
+                move |menu, _window, cx| Self::editor_tab_menu(menu, &app, pos, cx)
+            })
             .into_any_element()
     }
 
@@ -3264,6 +3586,17 @@ mod tests {
         assert!(old.is_char_boundary(s) && new.is_char_boundary(s));
         assert_eq!(&old[s..oe], "中");
         assert_eq!(&new[s..ne], "丰");
+    }
+
+    #[test]
+    fn an_agent_is_told_the_lines_a_selection_covers() {
+        let text = gpui_component::input::Rope::from("one\ntwo\nthree\n");
+        assert_eq!(selected_lines(&text, 0..0), None);
+        assert_eq!(selected_lines(&text, 1..2), Some((1, 1)));
+        assert_eq!(selected_lines(&text, 2..9), Some((1, 3)));
+        // Whole lines picked by dragging to the start of the next one.
+        assert_eq!(selected_lines(&text, 4..14), Some((2, 3)));
+        assert_eq!(selected_lines(&text, 0..4), Some((1, 1)));
     }
 
     #[test]

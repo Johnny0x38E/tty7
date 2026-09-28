@@ -1249,6 +1249,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorAlreadyOpen => "「{path}」はすでにエディタで開かれています",
         L10nKey::EditorGoToLine => "行へ移動",
         L10nKey::EditorGoToLineAction => "行へ移動…",
+        L10nKey::EditorCopyRelativePath => "相対パスをコピー",
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
         L10nKey::EditorSaveAs => "名前を付けて保存",
         L10nKey::EditorSaveAsAction => "名前を付けて保存…",

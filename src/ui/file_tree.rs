@@ -1607,20 +1607,38 @@ impl Tty7App {
     }
 
     fn file_tree_attach_to_agent(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.attach_path_to_agent(path, "", cx);
+    }
+
+    /// Types `@path` into the running agent's prompt, relative to the tree's
+    /// root when the file is under one. `suffix` goes straight after the
+    /// path — the editor adds the selected lines as `#L3-9`.
+    pub(crate) fn attach_path_to_agent(
+        &mut self,
+        path: &Path,
+        suffix: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.agent_target_leaf(cx) else {
             crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
             return;
         };
         let rel = self
-            .tab_code()
+            .path_under_tree_root(path)
+            .unwrap_or_else(|| path.to_path_buf());
+        target.update(cx, |view, cx| {
+            view.paste(format!("@{}{suffix} ", rel.display()), cx);
+        });
+    }
+
+    /// `path` relative to the first of this tab's tree roots it sits under.
+    pub(crate) fn path_under_tree_root(&self, path: &Path) -> Option<PathBuf> {
+        self.tab_code()
             .into_iter()
             .flat_map(|c| c.roots.iter())
             .find_map(|r| path.strip_prefix(r).ok())
+            .filter(|p| !p.as_os_str().is_empty())
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| path.to_path_buf());
-        target.update(cx, |view, cx| {
-            view.paste(format!("@{} ", rel.display()), cx);
-        });
     }
 }
 

@@ -1121,6 +1121,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorAlreadyOpen => "“{path}”已在编辑器中打开",
         L10nKey::EditorGoToLine => "跳转到行",
         L10nKey::EditorGoToLineAction => "跳转到行…",
+        L10nKey::EditorCopyRelativePath => "复制相对路径",
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorSaveAs => "另存为",
         L10nKey::EditorSaveAsAction => "另存为…",

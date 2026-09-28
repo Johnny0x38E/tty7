@@ -1201,6 +1201,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorAlreadyOpen => "\"{path}\" is already open in the editor",
         L10nKey::EditorGoToLine => "Go to line",
         L10nKey::EditorGoToLineAction => "Go to Line…",
+        L10nKey::EditorCopyRelativePath => "Copy Relative Path",
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorSaveAs => "Save as",
         L10nKey::EditorSaveAsAction => "Save As…",

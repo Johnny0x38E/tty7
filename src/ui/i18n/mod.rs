@@ -935,6 +935,7 @@ l10n_keys! {
     EditorAlreadyOpen,
     EditorGoToLine,
     EditorGoToLineAction,
+    EditorCopyRelativePath,
     EditorGoToLinePlaceholder,
     EditorSaveAs,
     EditorSaveAsAction,
