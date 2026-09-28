@@ -1,11 +1,11 @@
 ---
-title: "tty7"
+title: "diag e"
 description: "A terminal workbench: persistent sessions, remote work, agents."
 mode: "custom"
 ---
 
 {/* Mirrors CLIAgent::accent_rgb / icon_path: a solid brand disc with the
-   agent's own mark masked in white on top, as tab_strip.rs avatar_disc draws it. */}
+   agent own mark masked in white on top, as tab_strip.rs avatar_disc draws it. */}
 export const AGENTS = {
   claude: { name: "Claude Code", c: "#D97757" },
   codex: { name: "Codex", c: "#000000", edge: true },
@@ -148,7 +148,7 @@ export const sidebar = (ch, t) => {
   const g = GROUPS.map((x) => ({ ...x, items: x.items.map((it) => ({ ...it })) }));
   const find = (title) => g.flatMap((x) => x.items).find((it) => it.t === title);
   if (ch === 0) find("Refactor session auth").s = t < 3.1 ? "working" : "waiting";
-  /* A split stays in the same tab; the tab picks up the agent's status. */
+  /* A split stays in the same tab; the tab picks up the agent status. */
   if (ch === 1 && t >= 3.2) find("~/code/orbit").s = t < 6.4 ? "working" : "done";
   if ((ch === 3 && t >= 4.1) || ch === 4) {
     find("~/code/orbit").on = false;
