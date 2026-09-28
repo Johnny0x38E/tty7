@@ -51,14 +51,15 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 
 | | |
 |---|---|
-| **Agent 感知** | 逐 pane 识别 20 个 CLI agent · 状态点 · 通知 · 分支 + diff · 需要输入时托盘图标提醒 · 重启后续上会话 · 侧边栏按仓库分组 |
+| **Agent 感知** | 逐 pane 识别 26 个 CLI agent · 状态点 · 通知 · 分支 + diff · 需要输入时托盘图标提醒 · 重启后续上会话 · 在随处搜索里找回任意历史会话 · 一键启动 · 侧边栏按仓库分组，可置顶 |
 | **CLI + Skills** | 安装包自带 `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` 转发命令输出并原样返回退出码 · `split` · `send` · `wait --until free` · `capture` |
 | **编辑器级输入** | 基于历史的内联补全建议 · Tab 补全附带说明 · 语法高亮 · 多行编辑 · 点击定位光标 · <kbd>⌃ R</kbd> 模糊搜索历史 |
-| **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 随处搜索 · <kbd>⌘ F</kbd> 回滚搜索 · <kbd>⌘ J</kbd> 侧栏列出进程树和监听端口 · 13 套主题，也能写自己的 YAML 或导入 iTerm2 配色 · 输入法 |
+| **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 随处搜索 · <kbd>⌘ F</kbd> 回滚搜索 · 休眠标签页以释放内存 · 输入法 |
+| **侧边面板** | <kbd>⌘ J</kbd> · 进程树与监听端口 · 文件树 · 改动与 diff · 在文件中查找 · GitHub issue 与 PR（只读，通过 `gh` 登录） |
+| **个性化** | 13 套内置主题 · 自定义 YAML · 导入 iTerm2 配色 · 快捷键可重新绑定 · 界面支持 English、简体中文、日本語 |
 | **Shell 集成** | pane 启动时自动注入，不用你装什么 · 提示符边界 · 工作目录 · 退出码 · 命令跑完发通知 · 覆盖 zsh、bash、fish、PowerShell、WSL 和远程 pane |
 | **远程工作区** | 远端的文件、仓库、改动、diff、worktree、标签页和 pane · 从任意客户端重连，接着离开时的位置继续 |
 | **SSH** | 自带 russh 实现，不依赖外部 ssh：profile 凭据存入 keychain · SFTP 面板 · 端口转发 · 跳板机 · `tty7-server` 只需安装一次，无需 root |
-
 
 ## 支持的 agent
 
@@ -67,7 +68,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 **Fork** 两个条件都要：agent 自己提供 fork 命令，且 hook 已装——tty7 得知道 fork 的是哪个会话。
 
 <details>
-<summary>20 个 agent 的完整支持矩阵</summary>
+<summary>26 个 agent 的完整支持矩阵</summary>
 
 | Agent | 识别 | 状态 · 重启恢复 | Fork |
 |---|:-:|:-:|:-:|
@@ -83,14 +84,16 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 | **Goose** | ✓ | ✓ | ✓ |
 | **Qoder CLI** | ✓ | ✓ | ✓ |
 | **Qoder CN CLI** | ✓ | ✓ | ✓ |
+| **CodeBuddy** | ✓ | ✓ | ✓ |
 | **Gemini** | ✓ | ✓ | |
 | **Copilot** | ✓ | ✓ | |
 | **Kimi Code** | ✓ | ✓ | |
 | **Pi** | ✓ | ✓ | |
+| **Crush** | ✓ | ✓ | |
 | **Antigravity** | ✓ | ✓ | |
+| **Cursor** | ✓ | ✓ | |
 | Aider | ✓ | | |
 | Amp | ✓ | | |
-| Cursor | ✓ | | |
 | Auggie | ✓ | | |
 | Hermes | ✓ | | |
 | Vibe | ✓ | | |
