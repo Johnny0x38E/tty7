@@ -26,6 +26,13 @@ const REPLAY_SETTLE: Duration = Duration::from_millis(300);
 /// A backstop on reading the replay: it ends on the first live output or a
 /// quiet spell, and this only bounds a daemon that keeps sending status.
 const EXEC_REPLAY_MAX: Duration = Duration::from_secs(10);
+/// How long a prompt that came back before the command started is given to
+/// turn out to be the one the shell was still drawing. The daemon reports a
+/// pane at its prompt from the `D` precmd writes first, before the user's own
+/// precmd hooks have run and the prompt is on screen, so a line sent in that
+/// window is followed by that prompt's `A` and only then read and run. A line
+/// the shell really refused leaves the prompt standing.
+const REPROMPT_SETTLE: Duration = Duration::from_millis(750);
 
 const NOT_RUNNING: &str =
     "could not reach the tty7 server on this machine — `tty7 server start` brings one up";
@@ -334,7 +341,27 @@ impl Backend for RealBackend {
 
         self.send_input(pane, line)?;
         let mut transcript = Transcript::new();
+        // When a prompt came back with no command started before it: the
+        // line is only taken as refused once that has held for
+        // `REPROMPT_SETTLE`.
+        let mut reprompted: Option<std::time::Instant> = None;
         let end = loop {
+            if transcript.started() {
+                reprompted = None;
+            }
+            let settle = match reprompted {
+                Some(at) => {
+                    let left = REPROMPT_SETTLE.saturating_sub(at.elapsed());
+                    if left.is_zero() {
+                        break ExecEnd::Finished {
+                            exit: None,
+                            ran: false,
+                        };
+                    }
+                    Some(left)
+                }
+                None => None,
+            };
             let wait = match deadline {
                 Some(d) => {
                     let left = d.saturating_duration_since(std::time::Instant::now());
@@ -347,6 +374,10 @@ impl Backend for RealBackend {
                 }
                 None => None,
             };
+            let wait = match (wait, settle) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             let _ = session.set_recv_timeout(wait);
             match session.recv() {
                 Ok(DaemonMsg::Output(bytes)) => {
@@ -358,14 +389,18 @@ impl Backend for RealBackend {
                     at_prompt,
                     last_exit,
                     ..
-                }) => {
-                    if let Some(done) = transcript.prompt(at_prompt, last_exit) {
+                }) => match transcript.prompt(at_prompt, last_exit) {
+                    Some(done) if done.ran => {
                         break ExecEnd::Finished {
                             exit: done.exit,
-                            ran: done.ran,
+                            ran: true,
                         };
                     }
-                }
+                    Some(_) => {
+                        reprompted.get_or_insert_with(std::time::Instant::now);
+                    }
+                    None => {}
+                },
                 Ok(DaemonMsg::Exited { code }) => break ExecEnd::PaneExited(code),
                 Ok(_) => {}
                 Err(e) if timed_out(&e) => continue,
