@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use serde_json::json;
 use tty7_core::client::{ControlClient, PaneClient, PaneSession};
 use tty7_core::core::agent_hooks::{HookAgent, HookTarget, HooksState, hooks_state};
 use tty7_core::core::session::WorkspaceId;
@@ -483,47 +482,11 @@ fn keys<'a>(routes: impl Iterator<Item = &'a RouteInfo>) -> String {
 }
 
 fn route_matches(name: &str, route: &RouteInfo) -> bool {
-    route.key == name || host_of(&route.key) == Some(name)
-}
-
-fn host_of(key: &str) -> Option<&str> {
-    let first = key.split('|').next()?;
-    let after_user = first.split('@').nth(1)?;
-    after_user.split(':').next()
+    route.key == name || route.host() == Some(name)
 }
 
 fn target_for(route: &RouteInfo) -> Result<RouteTarget> {
-    if route.kind != "ssh" {
-        bail!(
-            "machine '{}' is a {} link — the CLI can only route over ssh links yet",
-            route.key,
-            route.kind
-        );
-    }
-    if route.key.contains('|') {
-        bail!(
-            "machine '{}' is reached through a jump/proxy chain, which the CLI cannot \
-             rebuild from the link key yet — use the GUI for this machine",
-            route.key
-        );
-    }
-    let (user, rest) = route
-        .key
-        .split_once('@')
-        .ok_or_else(|| anyhow!("unrecognized machine key '{}'", route.key))?;
-    let (host, port) = rest
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow!("unrecognized machine key '{}'", route.key))?;
-    let port: u16 = port
-        .parse()
-        .map_err(|_| anyhow!("unrecognized machine key '{}'", route.key))?;
-    let spec = serde_json::from_value(json!({
-        "user": user,
-        "host": host,
-        "port": port,
-        "auth_mode": "auto",
-    }))?;
-    Ok(RouteTarget::Ssh(Box::new(spec)))
+    route.target().map_err(|e| anyhow!(e))
 }
 
 #[cfg(test)]

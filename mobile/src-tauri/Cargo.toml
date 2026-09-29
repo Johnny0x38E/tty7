@@ -1,0 +1,40 @@
+[package]
+name = "tty7-mobile"
+version = "0.1.0"
+edition = "2024"
+description = "tty7 on a phone: watch and drive your desktop's panes and agents from anywhere"
+license = "Apache-2.0"
+publish = false
+
+# Its own workspace, not a member of the root one: Tauri pulls in a WebView
+# stack (webkit2gtk on Linux) that the desktop build and its CI have no reason
+# to compile. It shares the protocol and client crates by path, so the wire
+# format still has exactly one definition.
+[workspace]
+
+[lib]
+# `staticlib` for iOS, `cdylib` for Android, `rlib` for the desktop dev build.
+name = "tty7_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tty7-mobile-client = { path = "../../crates/tty7-mobile-client" }
+tty7-mobile-proto = { path = "../../crates/tty7-mobile-proto" }
+
+anyhow = "1"
+iroh = "1.2"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-barcode-scanner = "2"
+
+# Setting one WKWebView property the Tauri API does not reach (`edge_to_edge`).
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"

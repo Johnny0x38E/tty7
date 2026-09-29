@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The app finds a paired computer on the local network by mDNS when the
+	     addresses in its pairing code have changed (tty7-mobile-client::bind).
+	     iOS blocks multicast without both of these. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>tty7 looks for your paired computer on this network, so it can reach it after its address changes.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_tty7._udp</string>
+	</array>
+	<!-- Pairing by QR code: the camera reads the code tty7 shows in
+	     Settings → Mobile (tauri-plugin-barcode-scanner). -->
+	<key>NSCameraUsageDescription</key>
+	<string>tty7 uses the camera to scan the pairing code your computer shows.</string>
+	<!-- The only encryption is standard TLS/QUIC (rustls, iroh), which is
+	     exempt from export documentation. Saying so here spares the
+	     compliance question on every TestFlight upload. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>

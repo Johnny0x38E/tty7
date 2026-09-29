@@ -398,6 +398,52 @@ pub struct RouteInfo {
     pub connected: bool,
 }
 
+impl RouteInfo {
+    /// The host a link reaches: `build-box` in `me@build-box:22`. `None` for a
+    /// key of another shape.
+    pub fn host(&self) -> Option<&str> {
+        let first = self.key.split('|').next()?;
+        let after_user = first.split('@').nth(1)?;
+        after_user.split(':').next()
+    }
+
+    /// Rebuilds the target to route to this link over the local server, from
+    /// its key.
+    ///
+    /// Routing over a link the server already holds only needs the key's
+    /// `user@host:port` — the link is found by it and its credentials are
+    /// never used again — so an `auto` auth mode stands in for the profile's.
+    /// A jump/proxy chain would need the whole chain rebuilt, which the key
+    /// alone cannot do yet.
+    pub fn target(&self) -> Result<crate::daemon::router::RouteTarget, String> {
+        let unrecognized = || format!("unrecognized machine key '{}'", self.key);
+        if self.kind != "ssh" {
+            return Err(format!(
+                "machine '{}' is a {} link — tty7 can only route over ssh links yet",
+                self.key, self.kind
+            ));
+        }
+        if self.key.contains('|') {
+            return Err(format!(
+                "machine '{}' is reached through a jump/proxy chain, which cannot be rebuilt \
+                 from the link key yet — use the GUI for this machine",
+                self.key
+            ));
+        }
+        let (user, rest) = self.key.split_once('@').ok_or_else(unrecognized)?;
+        let (host, port) = rest.rsplit_once(':').ok_or_else(unrecognized)?;
+        let port: u16 = port.parse().map_err(|_| unrecognized())?;
+        let spec = serde_json::from_value(serde_json::json!({
+            "user": user,
+            "host": host,
+            "port": port,
+            "auth_mode": "auto",
+        }))
+        .map_err(|e| e.to_string())?;
+        Ok(crate::daemon::router::RouteTarget::Ssh(Box::new(spec)))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerStatus {
     pub pid: u32,

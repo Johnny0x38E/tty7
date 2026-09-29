@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::daemon::protocol::{
-    ClientMsg, DaemonMsg, DaemonVersion, PaneInfo, PaneProcs, ShellSpec, WinSize, is_error_kind,
-    peek_frame_kind, take_frame,
+    ClientMsg, DaemonMsg, DaemonVersion, LeaseRequest, PaneInfo, PaneProcs, ShellSpec, WinSize,
+    is_error_kind, peek_frame_kind, take_frame,
 };
 use crate::daemon::router::{RouteAction, RouteChannel, RouteHeader, RouteTarget, negotiate};
 use crate::daemon::transport;
@@ -292,6 +292,11 @@ impl PaneSession {
         self.input.resize(size)
     }
 
+    /// See [`PaneInput::lease`].
+    pub fn lease(&mut self, request: LeaseRequest) -> io::Result<()> {
+        self.input.lease(request)
+    }
+
     pub fn detach(self) -> io::Result<()> {
         self.input.detach()
     }
@@ -330,6 +335,13 @@ impl PaneInput {
 
     pub fn resize(&mut self, size: WinSize) -> io::Result<()> {
         ClientMsg::Resize(size).encode(&mut self.writer)
+    }
+
+    /// Only to a daemon that advertised
+    /// [`FEATURE_SIZE_LEASE`](crate::daemon::protocol::FEATURE_SIZE_LEASE):
+    /// an older one cannot decode it and drops the connection.
+    pub fn lease(&mut self, request: LeaseRequest) -> io::Result<()> {
+        ClientMsg::Lease(request).encode(&mut self.writer)
     }
 
     pub fn detach(mut self) -> io::Result<()> {

@@ -47,6 +47,33 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDefinedIn => "Defined in",
         L10nKey::SettingsConnectInNewTab => "Connect in new tab",
         L10nKey::SettingsCopied => "Copied",
+        L10nKey::SettingsNavMobile => "Mobile",
+        L10nKey::SettingsMobileAccess => "Allow phone access",
+        L10nKey::SettingsMobileAccessDesc => {
+            "Phones you pair can see this machine's panes and type into them, even with every window closed. Connections are end-to-end encrypted."
+        }
+        L10nKey::SettingsMobileStatusStarting => "Starting…",
+        L10nKey::SettingsMobileStatusFailed => "Not running: {error}",
+        L10nKey::SettingsMobileStartFailed => "Phone access could not start: {error}",
+        L10nKey::SettingsMobileNoAnswer => {
+            "the tty7 server did not start it. Restart the server in Settings → About, then try again."
+        }
+        L10nKey::SettingsMobilePair => "Pair a phone",
+        L10nKey::SettingsMobileShowCode => "Show code",
+        L10nKey::SettingsMobilePairDesc => "Shows a one-time code for the tty7 app on your phone.",
+        L10nKey::SettingsMobilePairNeedsAccess => "Turn on phone access first.",
+        L10nKey::SettingsMobilePairScan => {
+            "Scan this with the tty7 app on your phone, or copy the code and paste it there."
+        }
+        L10nKey::SettingsMobilePairValid => "Valid for 10 minutes, for one phone.",
+        L10nKey::SettingsMobileCopyCode => "Copy code",
+        L10nKey::SettingsMobilePaired => "Paired with {name}.",
+        L10nKey::SettingsMobilePhones => "Paired phones",
+        L10nKey::SettingsMobileNoPhones => "No phones paired yet.",
+        L10nKey::SettingsMobileUnpair => "Unpair",
+        L10nKey::SettingsSearchMobileKeywords => {
+            "phone mobile iphone android ipad pair qr code remote access"
+        }
         L10nKey::SettingsCopySshCommand => "Copy ssh command",
         L10nKey::SettingsStoredInTty7 => "Stored in tty7 settings",
         L10nKey::SettingsClickAgainToRemove => "Click again to remove",
@@ -1528,6 +1555,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteNoticeDisconnected => "Not connected — typing has no effect",
         L10nKey::RemoteActionRetryNow => "Retry Now",
         L10nKey::RemoteActionTakeBack => "Take Back",
+        L10nKey::PaneLeasedBy => "In use on {by}, at its screen size",
         L10nKey::RemoteActionConnect => "Connect",
         L10nKey::RemoteActionRetry => "Retry",
         L10nKey::RemoteActionRemoveEntry => "Remove entry",

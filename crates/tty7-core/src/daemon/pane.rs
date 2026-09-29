@@ -17,8 +17,8 @@ use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::core::term_modes::TerminalModes;
 use crate::daemon::protocol::{
-    AuthResponse, DaemonMsg, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind,
-    ShellSpec, WinSize,
+    AuthResponse, DaemonMsg, LeaseRequest, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext,
+    RemoteKind, ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
 
@@ -673,6 +673,19 @@ struct Observer {
     gate: Arc<OutputGate>,
 }
 
+/// An observer showing the pane at its own size — a phone, typically, while
+/// its user is away from the desk.
+///
+/// The pty runs at the observer's size and the observers see it; the
+/// controller keeps its own grid, is told who holds the pane, and is the only
+/// one that can end it early ([`LeaseRequest::TakeBack`]). What the controller
+/// asks for meanwhile is kept, not applied, and is what the pane goes back to.
+struct SizeLease {
+    observer: u64,
+    by: String,
+    desk: WinSize,
+}
+
 struct PaneState {
     id: u64,
     ring: ReplayRing,
@@ -689,6 +702,11 @@ struct PaneState {
     clipboard_write_from_spec: Option<bool>,
     observers: Vec<Observer>,
     observer_seq: u64,
+    lease: Option<SizeLease>,
+    /// The controller asked to hear about leases: it can say
+    /// [`DaemonMsg::Lease`], which a client from before them cannot decode.
+    /// Reset with every new controller.
+    lease_watch: bool,
     cwd: Option<PathBuf>,
     /// The last title the pane reported over OSC 0/2, for the machine tree to
     /// record. See [`crate::core::machine::PaneRecord::osc_title`].
@@ -829,6 +847,91 @@ fn resize_state(st: &mut PaneState, size: WinSize) {
     }
     st.observers
         .retain(|obs| obs.tx.send(DaemonMsg::Size(size)).is_ok());
+}
+
+fn tell_observer(st: &mut PaneState, observer: u64, msg: DaemonMsg) {
+    if let Some(obs) = st.observers.iter().find(|obs| obs.id == observer) {
+        let _ = obs.tx.send(msg);
+    }
+}
+
+fn tell_controller_lease(st: &PaneState) {
+    if !st.lease_watch {
+        return;
+    }
+    if let Some(sub) = &st.subscriber {
+        let _ = sub.send(DaemonMsg::Lease(st.lease.as_ref().map(|l| l.by.clone())));
+    }
+}
+
+/// An observer takes the pane at `size`, or changes the size it holds it at.
+/// Returns the size to put the pty at, once the state lock is let go.
+///
+/// A second observer taking it over displaces the first, who is told, and the
+/// size the desk asked for carries over, so ending the lease still restores
+/// the desk rather than the first observer's size.
+fn lease_take(st: &mut PaneState, observer: u64, size: WinSize, by: String) -> Option<WinSize> {
+    if !st.observers.iter().any(|obs| obs.id == observer) {
+        return None;
+    }
+    let desk = match st.lease.take() {
+        Some(prev) => {
+            if prev.observer != observer {
+                tell_observer(st, prev.observer, DaemonMsg::Lease(None));
+            }
+            prev.desk
+        }
+        None => st.ring.size(),
+    };
+    st.lease = Some(SizeLease {
+        observer,
+        by: by.clone(),
+        desk,
+    });
+    tell_controller_lease(st);
+    // The observers see the pane at the leased size, sealed into the ring so
+    // a replay does too. The controller keeps its grid and gets no Size: a
+    // client that is told its pane changed size resizes back to fit its
+    // window, and the two would take turns.
+    st.ring.resize(size);
+    st.observers
+        .retain(|obs| obs.tx.send(DaemonMsg::Size(size)).is_ok());
+    tell_observer(st, observer, DaemonMsg::Lease(Some(by)));
+    Some(size)
+}
+
+/// Ends the lease, whoever holds it, and puts the pane back at the size the
+/// desk last asked for. Returns that size for the pty, or `None` if there was
+/// no lease.
+fn lease_end(st: &mut PaneState) -> Option<WinSize> {
+    let lease = st.lease.take()?;
+    tell_observer(st, lease.observer, DaemonMsg::Lease(None));
+    tell_controller_lease(st);
+    resize_state(st, lease.desk);
+    Some(lease.desk)
+}
+
+/// Ends the lease if `observer` holds it: it let go, or it went away.
+fn lease_release(st: &mut PaneState, observer: u64) -> Option<WinSize> {
+    if st.lease.as_ref()?.observer != observer {
+        return None;
+    }
+    lease_end(st)
+}
+
+/// The controller's resize. Under a lease it is only remembered, for when the
+/// lease ends, and echoed to the controller alone so it reflows its own grid.
+/// Returns the size for the pty if it is to change now.
+fn controller_resize(st: &mut PaneState, size: WinSize) -> Option<WinSize> {
+    if let Some(lease) = &mut st.lease {
+        lease.desk = size;
+        if let Some(sub) = &st.subscriber {
+            let _ = sub.send(DaemonMsg::Size(size));
+        }
+        return None;
+    }
+    resize_state(st, size);
+    Some(size)
 }
 
 /// One gated message to the controller and to every observer.
@@ -1651,6 +1754,8 @@ impl DaemonPane {
                 clipboard_write_from_spec: None,
                 observers: Vec::new(),
                 observer_seq: 0,
+                lease: None,
+                lease_watch: false,
                 cwd: spawn.initial_cwd,
                 osc_title: restored_title,
                 shell: ShellState::default(),
@@ -1872,6 +1977,8 @@ impl DaemonPane {
                 clipboard_write_from_spec: None,
                 observers: Vec::new(),
                 observer_seq: 0,
+                lease: None,
+                lease_watch: false,
                 cwd: carried.cwd,
                 osc_title: carried.osc_title,
                 shell_spec: carried.shell_spec,
@@ -1936,6 +2043,8 @@ impl DaemonPane {
             clipboard_write_from_spec: Some(allow_remote_clipboard_write),
             observers: Vec::new(),
             observer_seq: 0,
+            lease: None,
+            lease_watch: false,
             // A native ssh pane is not running a shell of this machine's; what
             // it is, `ssh_spec` already says.
             shell_spec: None,
@@ -2309,8 +2418,51 @@ impl DaemonPane {
     }
 
     pub fn unobserve(&self, observer_id: u64) {
-        let mut st = self.state.lock().unwrap();
-        st.observers.retain(|obs| obs.id != observer_id);
+        let restore = {
+            let mut st = self.state.lock().unwrap();
+            let restore = lease_release(&mut st, observer_id);
+            st.observers.retain(|obs| obs.id != observer_id);
+            restore
+        };
+        if let Some(size) = restore {
+            self.resize_pty(size);
+        }
+    }
+
+    /// An observer's [`LeaseRequest`]: take the pane at its size, or let go.
+    pub fn observer_lease(&self, observer_id: u64, request: LeaseRequest) {
+        let apply = {
+            let mut st = self.state.lock().unwrap();
+            match request {
+                LeaseRequest::Take { size, by } => lease_take(&mut st, observer_id, size, by),
+                LeaseRequest::Release => lease_release(&mut st, observer_id),
+                LeaseRequest::Watch | LeaseRequest::TakeBack => None,
+            }
+        };
+        if let Some(size) = apply {
+            self.resize_pty(size);
+        }
+    }
+
+    /// The controller's [`LeaseRequest`]: hear about leases, or end one.
+    pub fn controller_lease(&self, request: LeaseRequest) {
+        let apply = {
+            let mut st = self.state.lock().unwrap();
+            match request {
+                LeaseRequest::Watch => {
+                    st.lease_watch = true;
+                    if st.lease.is_some() {
+                        tell_controller_lease(&st);
+                    }
+                    None
+                }
+                LeaseRequest::TakeBack => lease_end(&mut st),
+                LeaseRequest::Take { .. } | LeaseRequest::Release => None,
+            }
+        };
+        if let Some(size) = apply {
+            self.resize_pty(size);
+        }
     }
 
     pub fn controls(&self, epoch: u64) -> bool {
@@ -2383,8 +2535,15 @@ impl DaemonPane {
         }
     }
 
+    /// The controller's resize; see [`controller_resize`] for what a lease
+    /// makes of it.
     pub fn resize(&self, size: WinSize) {
-        resize_state(&mut self.state.lock().unwrap(), size);
+        if let Some(size) = controller_resize(&mut self.state.lock().unwrap(), size) {
+            self.resize_pty(size);
+        }
+    }
+
+    fn resize_pty(&self, size: WinSize) {
         match &self.backend {
             PaneBackend::Pty(p) => {
                 if let Ok(master) = p.master.lock() {
@@ -2785,6 +2944,11 @@ impl ReplayRing {
         self.segments.back_mut().expect("ring always has a tail")
     }
 
+    /// The size the pane is at now: the newest segment's.
+    fn size(&self) -> WinSize {
+        self.segments.back().expect("ring always has a tail").size
+    }
+
     fn resize(&mut self, size: WinSize) {
         let tail = self.tail();
         if tail.size == size {
@@ -3006,6 +3170,7 @@ fn attach_subscriber_with_permissions(
     foreground_command: bool,
 ) -> u64 {
     st.subscriber_epoch += 1;
+    st.lease_watch = false;
     set_clipboard_permission(st, allow_remote_clipboard_write);
     replay_state(st, &subscriber, foreground_command);
     st.subscriber = Some(subscriber);
@@ -5309,6 +5474,8 @@ mod tests {
             clipboard_write_from_spec: None,
             observers: Vec::new(),
             observer_seq: 0,
+            lease: None,
+            lease_watch: false,
             shell_spec: None,
             cwd: None,
             osc_title: None,
@@ -6105,6 +6272,139 @@ mod tests {
             got.push(msg);
         }
         got
+    }
+
+    /// A controller that watches leases, and an observer: what each hears.
+    fn leased_rig() -> (
+        PaneState,
+        mpsc::Receiver<DaemonMsg>,
+        u64,
+        mpsc::Receiver<DaemonMsg>,
+    ) {
+        let mut st = test_state(true);
+        let (controller_tx, controller_rx) = mpsc::channel();
+        attach_subscriber(&mut st, controller_tx);
+        st.lease_watch = true;
+        let (observer_tx, observer_rx) = mpsc::channel();
+        let phone = observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
+        drain(&controller_rx);
+        drain(&observer_rx);
+        (st, controller_rx, phone, observer_rx)
+    }
+
+    #[test]
+    fn a_lease_resizes_for_observers_and_only_names_the_holder_to_the_controller() {
+        let (mut st, controller_rx, phone, observer_rx) = leased_rig();
+
+        let pty = lease_take(&mut st, phone, ws(40, 30), "phone".into());
+        assert_eq!(pty, Some(ws(40, 30)));
+        assert_eq!(st.ring.size(), ws(40, 30), "a replay shows the leased size");
+        assert_eq!(
+            drain(&observer_rx),
+            vec![
+                DaemonMsg::Size(ws(40, 30)),
+                DaemonMsg::Lease(Some("phone".into()))
+            ]
+        );
+        assert_eq!(
+            drain(&controller_rx),
+            vec![DaemonMsg::Lease(Some("phone".into()))],
+            "the controller keeps its grid: no Size, or it would resize back"
+        );
+    }
+
+    #[test]
+    fn the_desk_resizing_under_a_lease_is_kept_for_later() {
+        let (mut st, controller_rx, phone, observer_rx) = leased_rig();
+        lease_take(&mut st, phone, ws(40, 30), "phone".into());
+        drain(&controller_rx);
+        drain(&observer_rx);
+
+        assert_eq!(
+            controller_resize(&mut st, ws(120, 40)),
+            None,
+            "the pty stays put"
+        );
+        assert_eq!(st.ring.size(), ws(40, 30));
+        assert_eq!(drain(&controller_rx), vec![DaemonMsg::Size(ws(120, 40))]);
+        assert!(drain(&observer_rx).is_empty());
+
+        // Letting go restores what the desk asked for last, not what it had.
+        assert_eq!(lease_release(&mut st, phone), Some(ws(120, 40)));
+        assert_eq!(st.ring.size(), ws(120, 40));
+        assert_eq!(
+            drain(&observer_rx),
+            vec![DaemonMsg::Lease(None), DaemonMsg::Size(ws(120, 40))]
+        );
+        assert_eq!(
+            drain(&controller_rx),
+            vec![DaemonMsg::Lease(None), DaemonMsg::Size(ws(120, 40))]
+        );
+        assert!(st.lease.is_none());
+    }
+
+    #[test]
+    fn taking_back_ends_the_lease_and_restores_the_desk() {
+        let (mut st, controller_rx, phone, observer_rx) = leased_rig();
+        lease_take(&mut st, phone, ws(40, 30), "phone".into());
+        drain(&controller_rx);
+        drain(&observer_rx);
+
+        assert_eq!(lease_end(&mut st), Some(ws(80, 24)));
+        assert_eq!(st.ring.size(), ws(80, 24));
+        assert_eq!(
+            drain(&observer_rx),
+            vec![DaemonMsg::Lease(None), DaemonMsg::Size(ws(80, 24))]
+        );
+        assert_eq!(lease_end(&mut st), None, "nothing left to end");
+        // The observer that lost it cannot end a lease it no longer holds.
+        assert_eq!(lease_release(&mut st, phone), None);
+    }
+
+    #[test]
+    fn a_second_observer_takes_over_and_the_desk_size_carries() {
+        let (mut st, controller_rx, phone, observer_rx) = leased_rig();
+        let (tablet_tx, tablet_rx) = mpsc::channel();
+        let tablet = observe_subscriber(&mut st, tablet_tx, Arc::new(OutputGate::new()), false);
+        drain(&tablet_rx);
+
+        lease_take(&mut st, phone, ws(40, 30), "phone".into());
+        lease_take(&mut st, tablet, ws(100, 50), "tablet".into());
+        drain(&controller_rx);
+        let heard = drain(&observer_rx);
+        assert_eq!(heard.last(), Some(&DaemonMsg::Size(ws(100, 50))));
+        assert!(
+            heard.contains(&DaemonMsg::Lease(None)),
+            "the phone is told it lost it"
+        );
+
+        assert_eq!(lease_release(&mut st, phone), None);
+        assert_eq!(lease_release(&mut st, tablet), Some(ws(80, 24)));
+    }
+
+    #[test]
+    fn a_controller_that_did_not_ask_hears_no_lease() {
+        let (mut st, controller_rx, phone, _observer_rx) = leased_rig();
+        st.lease_watch = false;
+        lease_take(&mut st, phone, ws(40, 30), "phone".into());
+        assert!(drain(&controller_rx).is_empty());
+        lease_end(&mut st);
+        assert_eq!(drain(&controller_rx), vec![DaemonMsg::Size(ws(80, 24))]);
+    }
+
+    #[test]
+    fn a_new_controller_must_ask_again() {
+        let (mut st, _controller_rx, _phone, _observer_rx) = leased_rig();
+        let (tx, _rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+        assert!(!st.lease_watch);
+    }
+
+    #[test]
+    fn an_unknown_observer_cannot_take_a_lease() {
+        let (mut st, _c, _phone, _o) = leased_rig();
+        assert_eq!(lease_take(&mut st, 999, ws(40, 30), "ghost".into()), None);
+        assert!(st.lease.is_none());
     }
 
     #[test]

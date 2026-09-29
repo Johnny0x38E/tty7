@@ -9,6 +9,7 @@ pub mod duplex;
 pub mod handoff;
 pub mod history;
 pub mod install;
+pub mod mobile;
 pub mod pane;
 pub mod pidfile;
 pub mod procinfo;

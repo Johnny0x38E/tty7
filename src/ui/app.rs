@@ -7007,6 +7007,10 @@ impl Tty7App {
             ssh_show_all: false,
             ssh_confirm_remove: false,
             ssh_copied: None,
+            mobile_pairing: None,
+            mobile_paired: None,
+            mobile_copied: false,
+            mobile_starting: false,
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
@@ -8600,6 +8604,51 @@ impl Tty7App {
         )
     }
 
+    /// One pill per pane in the active tab that a phone is running at its own
+    /// size. The window keeps its grid meanwhile and shows the pane's output
+    /// laid out for the phone, so it says why, and offers the pane back.
+    fn render_lease_notices(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        use gpui_component::Sizable as _;
+        use gpui_component::button::ButtonVariants as _;
+        let Some(tab) = self.tabs.get(self.active) else {
+            return Vec::new();
+        };
+        let theme = cx.theme();
+        let (info, foreground, popover) = (theme.info, theme.foreground, theme.popover);
+        tab.pane
+            .terminals()
+            .into_iter()
+            .filter_map(|leaf| {
+                let by = leaf.read(cx).terminal.leased_by()?;
+                let id = leaf.entity_id().as_u64();
+                Some(
+                    crate::ui::notice::pill(info, cx)
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(foreground)
+                                .child(crate::ui::i18n::t_fmt(
+                                    crate::ui::i18n::L10nKey::PaneLeasedBy,
+                                    &[("by", &by)],
+                                )),
+                        )
+                        .child(
+                            gpui_component::button::Button::new(gpui::SharedString::from(format!(
+                                "lease-take-back-{id}"
+                            )))
+                            .label(crate::ui::i18n::t(
+                                crate::ui::i18n::L10nKey::RemoteActionTakeBack,
+                            ))
+                            .custom(crate::ui::theme::inverted_button(popover, cx))
+                            .small()
+                            .on_click(move |_, _, cx| leaf.read(cx).terminal.take_back()),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
     fn render_remote_input_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.tabs.is_empty() {
             return None;
@@ -8978,6 +9027,7 @@ impl Render for Tty7App {
                     [self.render_remote_input_notice(cx), ssh_status]
                         .into_iter()
                         .flatten()
+                        .chain(self.render_lease_notices(cx))
                         .collect(),
                 ),
                 |this, el| this.child(el),

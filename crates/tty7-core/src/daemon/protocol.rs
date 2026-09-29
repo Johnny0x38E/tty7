@@ -39,6 +39,29 @@ pub const FEATURE_HANDOFF: &str = "handoff";
 /// and drops the route unanswered, so the client checks first and says why.
 pub const FEATURE_UPDATE_SERVER: &str = "update-server";
 
+/// The daemon understands [`ClientMsg::Lease`]: an observer can show a pane at
+/// its own size until it lets go or the controller takes it back. A client
+/// must see this before sending one; an older daemon cannot decode the frame
+/// and drops the connection.
+pub const FEATURE_SIZE_LEASE: &str = "size-lease";
+
+/// What a [`ClientMsg::Lease`] asks. The first two are an observer's, the last
+/// two the controller's; each side's are ignored from the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseRequest {
+    /// Put the pty at `size` while this observer is connected. `by` names
+    /// it to the controller ("Thomas's iPhone"). Sent again to change size.
+    Take { size: WinSize, by: String },
+    /// Put the pane back at the size the controller asked for.
+    Release,
+    /// The controller can hear [`DaemonMsg::Lease`]; tell it now and on
+    /// every change.
+    Watch,
+    /// The controller ends the lease, whoever holds it.
+    TakeBack,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonVersion {
     pub protocol: u32,
@@ -57,6 +80,7 @@ impl DaemonVersion {
             FEATURE_RESIZE_ECHO.to_string(),
             FEATURE_RESTORE_SCROLLBACK.to_string(),
             FEATURE_UPDATE_SERVER.to_string(),
+            FEATURE_SIZE_LEASE.to_string(),
         ];
         if cfg!(unix) {
             features.push(FEATURE_HANDOFF.to_string());
@@ -932,6 +956,8 @@ pub enum ClientMsg {
     },
     OnWorkspace(Box<WorkspaceRequest>),
     Version,
+    /// Only after the daemon advertised [`FEATURE_SIZE_LEASE`].
+    Lease(LeaseRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -992,6 +1018,11 @@ pub enum DaemonMsg {
     ForwardList(Vec<ManagedForward>),
     Procs(PaneProcs),
     Version(DaemonVersion),
+    /// Who holds the pane at their own size, or `None` once nobody does. Sent
+    /// to the holding observer and to a controller that asked with
+    /// [`LeaseRequest::Watch`], never to anyone else: older clients cannot
+    /// decode it.
+    Lease(Option<String>),
     Error(String),
 }
 
@@ -1027,6 +1058,7 @@ mod kind {
     pub const OBSERVE: u8 = 54;
     pub const SEND_INPUT: u8 = 55;
     pub const HANDOFF: u8 = 56;
+    pub const LEASE: u8 = 57;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -1061,6 +1093,7 @@ mod kind {
     /// (issue #213). Compact binary selector, like `IMAGE`.
     pub const DELETE_IMAGE: u8 = 61;
     pub const CLIPBOARD_WRITE: u8 = 62;
+    pub const LEASE_HOLDER: u8 = 63;
 }
 
 pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -1256,6 +1289,7 @@ impl ClientMsg {
             ClientMsg::List => write_frame(w, kind::LIST, &[]),
             ClientMsg::Shutdown => write_frame(w, kind::SHUTDOWN, &[]),
             ClientMsg::Handoff { exe } => write_frame(w, kind::HANDOFF, &to_json(exe)?),
+            ClientMsg::Lease(request) => write_frame(w, kind::LEASE, &to_json(request)?),
             ClientMsg::EnsureLoopbackForward(req) => {
                 write_frame(w, kind::ENSURE_LOOPBACK_FORWARD, &to_json(req)?)
             }
@@ -1383,6 +1417,7 @@ impl ClientMsg {
             },
             kind::LIST => ClientMsg::List,
             kind::SHUTDOWN => ClientMsg::Shutdown,
+            kind::LEASE => ClientMsg::Lease(from_json(&payload)?),
             kind::HANDOFF => ClientMsg::Handoff {
                 exe: from_json(&payload)?,
             },
@@ -1470,6 +1505,7 @@ impl DaemonMsg {
             DaemonMsg::Image(frame) => write_frame(w, kind::IMAGE, frame),
             DaemonMsg::DeleteImage(sel) => write_frame(w, kind::DELETE_IMAGE, sel),
             DaemonMsg::ClipboardWrite(frame) => write_frame(w, kind::CLIPBOARD_WRITE, frame),
+            DaemonMsg::Lease(by) => write_frame(w, kind::LEASE_HOLDER, &to_json(by)?),
             DaemonMsg::Cwd(path) => write_frame(w, kind::CWD, &to_json(path)?),
             DaemonMsg::Prompt {
                 active,
@@ -1527,6 +1563,7 @@ impl DaemonMsg {
             kind::IMAGE => DaemonMsg::Image(payload),
             kind::DELETE_IMAGE => DaemonMsg::DeleteImage(payload),
             kind::CLIPBOARD_WRITE => DaemonMsg::ClipboardWrite(payload),
+            kind::LEASE_HOLDER => DaemonMsg::Lease(from_json(&payload)?),
             kind::CWD => DaemonMsg::Cwd(from_json(&payload)?),
             kind::PROMPT => {
                 let (active, at_prompt, last_exit) = from_json(&payload)?;
@@ -1659,6 +1696,13 @@ mod tests {
     #[test]
     fn client_roundtrip() {
         let msgs = vec![
+            ClientMsg::Lease(LeaseRequest::Take {
+                size: SIZE,
+                by: "phone".into(),
+            }),
+            ClientMsg::Lease(LeaseRequest::Release),
+            ClientMsg::Lease(LeaseRequest::Watch),
+            ClientMsg::Lease(LeaseRequest::TakeBack),
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
@@ -1849,6 +1893,8 @@ mod tests {
     fn daemon_roundtrip() {
         let msgs = vec![
             DaemonMsg::Spawned { pane_id: 1 },
+            DaemonMsg::Lease(Some("Thomas's iPhone".into())),
+            DaemonMsg::Lease(None),
             DaemonMsg::Size(SIZE),
             DaemonMsg::Snapshot(vec![1, 2, 3, 0, 255]),
             DaemonMsg::Output((0u8..=255).collect()),

@@ -1226,6 +1226,11 @@ pub(crate) fn pane_workspace_for(
         host.host_id(),
         crate::daemon::protocol::FEATURE_RESIZE_ECHO,
     );
+    let size_lease = remote_connect::HostLinks::peer_supports(
+        cx,
+        host.host_id(),
+        crate::daemon::protocol::FEATURE_SIZE_LEASE,
+    );
     // The workspace's own name where it has one, the machine's otherwise —
     // what the pane's tab falls back to when nothing has titled it, and what
     // a dead link's "— disconnected" suffix hangs off.
@@ -1241,6 +1246,7 @@ pub(crate) fn pane_workspace_for(
         spec,
         label,
         resize_echo,
+        size_lease,
     };
     if let Ok(header) = pane.route_header() {
         remote_connect::note_origin(&header.target, &pane.target);

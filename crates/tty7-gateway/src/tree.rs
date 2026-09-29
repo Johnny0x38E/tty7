@@ -1,0 +1,224 @@
+//! The machine tree, as the phone sees it.
+//!
+//! The daemon's tree is the document it persists — split ratios, pinned
+//! groups, SSH specs, who holds which workspace. The phone needs a list to tap
+//! through: workspaces, their tabs, the panes in each, and which of those have
+//! an agent waiting on someone. This module is that reduction, and the naming
+//! goes through `tab_view` so a tab reads the same here as in the CLI and the
+//! desktop's switcher.
+
+use tty7_core::core::cli_agent::{AgentSessionState, AgentStatus as CoreStatus, CLIAgent};
+use tty7_core::core::machine::{Machine, PaneRecord};
+use tty7_core::core::tab_view::{TabLabel, strip_host_prefix, strip_status_mark, tab_views_of};
+use tty7_core::daemon::control::PaneAgentState;
+use tty7_mobile_proto::{AgentStatus, AgentView, PaneView, TabView, Tree, WorkspaceView};
+
+pub fn build(host: &str, machine: &Machine, agents: &[PaneAgentState]) -> Tree {
+    let mut workspaces: Vec<_> = machine.workspaces.iter().collect();
+    // Most recently used first: on a phone the one you were just in is the
+    // one you are coming back to.
+    workspaces.sort_by_key(|ws| std::cmp::Reverse(ws.last_active));
+    Tree {
+        host: host.to_string(),
+        workspaces: workspaces
+            .into_iter()
+            .map(|ws| {
+                let views = tab_views_of(ws, &machine.panes);
+                WorkspaceView {
+                    id: ws.id.to_string(),
+                    name: ws
+                        .name
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| "-".to_string()),
+                    tabs: ws
+                        .tabs
+                        .iter()
+                        .zip(views)
+                        .map(|(tab, view)| TabView {
+                            id: tab.id.to_string(),
+                            name: tab_name(view.label()),
+                            hibernated: tab.hibernated,
+                            panes: tab
+                                .root
+                                .pane_ids()
+                                .into_iter()
+                                .map(|id| pane_view(id, &machine.panes, agents))
+                                .collect(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+        remotes: Vec::new(),
+    }
+}
+
+fn tab_name(label: TabLabel<'_>) -> String {
+    match label {
+        TabLabel::Named(name) => name.to_string(),
+        TabLabel::Osc(title) => strip_host_prefix(title).to_string(),
+        TabLabel::Agent(agent) => agent.display_name().to_string(),
+        TabLabel::Cwd(cwd) => path_leaf(cwd).to_string(),
+        TabLabel::Process(title) => title.to_string(),
+        TabLabel::Unknown => "-".to_string(),
+    }
+}
+
+fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneView {
+    let record = panes.iter().find(|p| p.id == id);
+    let title = record
+        .and_then(|p| p.osc_title.as_deref())
+        .map(|t| strip_host_prefix(strip_status_mark(t.trim())))
+        .filter(|t| !t.is_empty())
+        .or_else(|| record.map(|p| p.title.as_str()).filter(|t| !t.is_empty()))
+        .unwrap_or("-")
+        .to_string();
+    // The live state wins: the record's status is what was last persisted,
+    // while `AgentStates` is what the daemon's hook listener heard just now.
+    let live = agents.iter().find(|a| a.pane_id == id);
+    let agent = match live {
+        Some(live) => live
+            .agent
+            .or_else(|| record.and_then(|p| p.agent.as_ref()).map(|f| f.agent))
+            .map(|agent| agent_view(agent, &live.state)),
+        None => record
+            .and_then(|p| p.agent.as_ref())
+            .map(|facts| AgentView {
+                kind: facts.agent.slug().to_string(),
+                status: status(facts.status.unwrap_or_default()),
+                message: None,
+            }),
+    };
+    PaneView {
+        id,
+        title,
+        cwd: record.and_then(|p| p.cwd.clone()),
+        agent,
+    }
+}
+
+pub fn agent_view(agent: CLIAgent, state: &AgentSessionState) -> AgentView {
+    AgentView {
+        kind: agent.slug().to_string(),
+        status: status(state.status),
+        message: state.message.clone(),
+    }
+}
+
+pub fn status(s: CoreStatus) -> AgentStatus {
+    match s {
+        CoreStatus::Idle => AgentStatus::Idle,
+        CoreStatus::Working => AgentStatus::Working,
+        CoreStatus::Waiting => AgentStatus::Waiting,
+        CoreStatus::Done => AgentStatus::Done,
+    }
+}
+
+fn path_leaf(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|leaf| !leaf.is_empty())
+        .unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tty7_core::core::machine::{AgentFacts, Tab, Workspace};
+
+    fn record(id: u64, title: &str, osc: Option<&str>, cwd: &str) -> PaneRecord {
+        let mut value = serde_json::json!({
+            "id": id,
+            "title": title,
+            "cwd": cwd,
+        });
+        if let Some(osc) = osc {
+            value["osc_title"] = osc.into();
+        }
+        serde_json::from_value(value).expect("a pane record from its minimal fields")
+    }
+
+    fn workspace(name: &str, last_active: u64, tabs: Vec<Tab>) -> Workspace {
+        Workspace {
+            name: Some(name.to_string()),
+            last_active,
+            tabs,
+            ..Workspace::default()
+        }
+    }
+
+    #[test]
+    fn workspaces_come_most_recent_first_with_their_tabs_and_panes() {
+        let mut named = Tab::leaf(1);
+        named.name = Some("build".into());
+        let machine = Machine {
+            workspaces: vec![
+                workspace("old-owl", 10, vec![named]),
+                workspace("pale-otter", 20, vec![Tab::leaf(2)]),
+            ],
+            panes: vec![
+                record(1, "zsh", None, "/src/a"),
+                record(2, "zsh", Some("me@box:~/src/b"), "/src/b"),
+            ],
+        };
+        let tree = build("studio", &machine, &[]);
+        assert_eq!(tree.host, "studio");
+        let names: Vec<_> = tree.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["pale-otter", "old-owl"]);
+        assert_eq!(tree.workspaces[0].tabs[0].name, "~/src/b");
+        assert_eq!(tree.workspaces[0].tabs[0].panes[0].title, "~/src/b");
+        assert_eq!(tree.workspaces[1].tabs[0].name, "build");
+        assert_eq!(
+            tree.workspaces[1].tabs[0].panes[0].cwd.as_deref(),
+            Some("/src/a")
+        );
+    }
+
+    #[test]
+    fn live_agent_state_beats_the_persisted_one() {
+        let mut rec = record(3, "node", None, "/src");
+        rec.agent = Some(AgentFacts {
+            agent: CLIAgent::Claude,
+            session_id: None,
+            launch_argv: None,
+            status: Some(CoreStatus::Working),
+        });
+        let machine = Machine {
+            workspaces: vec![workspace("w", 1, vec![Tab::leaf(3), Tab::leaf(4)])],
+            panes: vec![rec, record(4, "zsh", None, "/src")],
+        };
+
+        let persisted = build("h", &machine, &[]);
+        let pane = &persisted.workspaces[0].tabs[0].panes[0];
+        let agent = pane.agent.as_ref().unwrap();
+        assert_eq!(
+            (agent.kind.as_str(), agent.status),
+            ("claude", AgentStatus::Working)
+        );
+
+        let live = [PaneAgentState {
+            pane_id: 3,
+            agent: None,
+            state: AgentSessionState {
+                status: CoreStatus::Waiting,
+                message: Some("needs permission".into()),
+                ..AgentSessionState::default()
+            },
+        }];
+        let tree = build("h", &machine, &live);
+        let agent = tree.workspaces[0].tabs[0].panes[0].agent.clone().unwrap();
+        assert_eq!(agent.status, AgentStatus::Waiting);
+        assert_eq!(agent.message.as_deref(), Some("needs permission"));
+        assert!(tree.workspaces[0].tabs[1].panes[0].agent.is_none());
+    }
+
+    #[test]
+    fn a_path_is_cut_to_its_leaf() {
+        assert_eq!(path_leaf("/a/b/c/"), "c");
+        assert_eq!(path_leaf(r"C:\proj\x"), "x");
+        assert_eq!(path_leaf("/"), "/");
+    }
+}

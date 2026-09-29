@@ -1,0 +1,45 @@
+[package]
+name = "tty7-gateway"
+version.workspace = true
+edition.workspace = true
+description = "tty7's mobile gateway: lets a paired phone watch and drive this machine's panes over iroh"
+repository = "https://github.com/l0ng-ai/tty7"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "tty7-gateway"
+path = "src/main.rs"
+
+[dependencies]
+tty7-core = { path = "../tty7-core" }
+tty7-mobile-proto = { path = "../tty7-mobile-proto", features = ["tokio"] }
+
+anyhow.workspace = true
+log.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+# Dials by public key, punches through NATs, and falls back to a relay when it
+# cannot — so a phone on cellular reaches a laptop behind a home router with no
+# port forwarding and no VPN, end-to-end encrypted either way.
+iroh = "1.2"
+# Lets a phone on the same network find the gateway by its key when the
+# addresses in its pairing code have gone stale — a new DHCP lease, a new IPv6
+# prefix — with no relay reachable to ask instead.
+iroh-mdns-address-lookup = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+getrandom = "0.3"
+# Draws the pairing code as a QR code right in the terminal.
+qrcode = { version = "0.14", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tty7-mobile-client = { path = "../tty7-mobile-client" }
+
+[lints]
+workspace = true

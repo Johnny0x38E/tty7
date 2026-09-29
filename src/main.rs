@@ -621,7 +621,14 @@ fn main() {
     let daemon = args
         .iter()
         .any(|arg| arg == std::ffi::OsStr::new("--daemon"));
-    let role = if daemon { "daemon" } else { "gui" };
+    let mobile_helper = args
+        .iter()
+        .any(|arg| arg == std::ffi::OsStr::new(tty7_core::daemon::mobile::GATEWAY_FLAG));
+    let role = match (daemon, mobile_helper) {
+        (true, _) => "daemon",
+        (false, true) => "mobile",
+        (false, false) => "gui",
+    };
     crate::core::crash::install(role);
     crate::core::logfile::install(role);
 
@@ -646,6 +653,17 @@ fn main() {
         if let Err(error) = result {
             log::error!("the Explorer context-menu update failed: {error}");
             std::process::exit(1);
+        }
+        return;
+    }
+
+    // The daemon's mobile gateway, run by the daemon as its child: see
+    // `tty7_core::daemon::mobile`.
+    if mobile_helper {
+        let served = tty7_gateway::state::State::open_default()
+            .and_then(tty7_gateway::service::serve_until_stdin_closes);
+        if let Err(e) = served {
+            log::warn!("mobile gateway: {e:#}");
         }
         return;
     }

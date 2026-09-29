@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
 use crate::daemon::pane::DaemonPane;
-use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, RemoteKind};
+use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, LeaseRequest, RemoteKind};
 use crate::daemon::ssh::SshConnection;
 use crate::daemon::transport::{self, Stream};
 
@@ -533,12 +533,19 @@ fn hand_over(registry: &Registry, exe: &std::path::Path) -> anyhow::Error {
         store.flush();
     }
 
-    crate::daemon::handoff::take_over(
+    // The new image cannot reap a child it did not start; it starts its own.
+    crate::daemon::mobile::stop_for_handoff();
+
+    let failed = crate::daemon::handoff::take_over(
         exe,
         carried,
         registry.alloc_id(),
         crate::daemon::singleton::held_fd(),
-    )
+    );
+    // Still this program: the exec did not happen, so this daemon goes on
+    // serving, and so does its gateway.
+    crate::daemon::mobile::handoff_failed();
+    failed
 }
 
 #[cfg(not(unix))]
@@ -614,6 +621,9 @@ fn run_with(registry: Arc<Registry>, alone: bool) -> anyhow::Result<()> {
     report_conpty_host();
 
     crate::daemon::pidfile::write_current();
+
+    // Phone access, when it is switched on: see `daemon::mobile`.
+    crate::daemon::mobile::supervise();
 
     #[cfg(unix)]
     serve_sigterm(registry.clone());
@@ -1192,7 +1202,9 @@ fn stream_observer(
     let observer_id = pane.observe(tx, gate.clone());
     let writer = spawn_writer(rx, write_stream, gate);
 
-    observe_loop(&mut read_stream, &refusals);
+    observe_loop(&mut read_stream, &refusals, |request| {
+        pane.observer_lease(observer_id, request)
+    });
 
     pane.unobserve(observer_id);
     drop(refusals);
@@ -1200,9 +1212,14 @@ fn stream_observer(
     Ok(())
 }
 
-fn observe_loop<R: std::io::Read>(read_stream: &mut R, refusals: &mpsc::Sender<DaemonMsg>) {
+fn observe_loop<R: std::io::Read>(
+    read_stream: &mut R,
+    refusals: &mpsc::Sender<DaemonMsg>,
+    mut lease: impl FnMut(LeaseRequest),
+) {
     loop {
         match ClientMsg::read(read_stream) {
+            Ok(ClientMsg::Lease(request)) => lease(request),
             Ok(ClientMsg::Input(_)) | Ok(ClientMsg::Resize(_)) => {
                 let refused = refusals.send(DaemonMsg::Error(
                     "this connection is a read-only observer; attach to write".to_string(),
@@ -1259,6 +1276,12 @@ fn run_stream(
                         break 'conn;
                     }
                     pane.resize(size);
+                }
+                ClientMsg::Lease(request) => {
+                    if !pane.controls(epoch) {
+                        break 'conn;
+                    }
+                    pane.controller_lease(request);
                 }
                 ClientMsg::AuthResponse {
                     request_id,
@@ -1444,7 +1467,7 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        observe_loop(&mut std::io::Cursor::new(wire), &tx);
+        observe_loop(&mut std::io::Cursor::new(wire), &tx, |_| {});
         drop(tx);
 
         assert!(
@@ -1464,7 +1487,7 @@ mod tests {
     #[test]
     fn the_observer_loop_ends_at_stream_eof() {
         let (tx, rx) = std::sync::mpsc::channel();
-        observe_loop(&mut std::io::Cursor::new(Vec::<u8>::new()), &tx);
+        observe_loop(&mut std::io::Cursor::new(Vec::<u8>::new()), &tx, |_| {});
         drop(tx);
         assert!(rx.try_recv().is_err());
     }

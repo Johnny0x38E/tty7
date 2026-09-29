@@ -298,6 +298,11 @@ pub struct Config {
     /// a check happens every six hours.
     #[serde(default = "default_true")]
     pub auto_download_updates: bool,
+    /// Whether the local daemon runs the mobile gateway, so phones paired in
+    /// Settings → Mobile can reach this machine's panes. Off by default: it
+    /// opens a UDP port, and a paired phone can type into any pane.
+    #[serde(default)]
+    pub mobile_access: bool,
     /// Whether the GUI puts the bundled `tty7` CLI on PATH at launch (see
     /// `core::cli_install`). On by default: the CLI is the agent-facing half of
     /// this product and is worth nothing sitting unreachable inside the bundle.
@@ -780,6 +785,7 @@ impl Default for Config {
             sidebar_auto_grouping: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
+            mobile_access: false,
             update_channel: UpdateChannel::default(),
             auto_download_updates: true,
             install_cli_on_path: true,

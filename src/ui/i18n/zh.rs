@@ -43,6 +43,31 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDefinedIn => "定义于",
         L10nKey::SettingsConnectInNewTab => "在新标签页中连接",
         L10nKey::SettingsCopied => "已复制",
+        L10nKey::SettingsNavMobile => "手机",
+        L10nKey::SettingsMobileAccess => "允许手机访问",
+        L10nKey::SettingsMobileAccessDesc => {
+            "配对过的手机可以查看并操作这台电脑上的窗格，关掉所有窗口也可以。连接端到端加密。"
+        }
+        L10nKey::SettingsMobileStatusStarting => "正在启动…",
+        L10nKey::SettingsMobileStatusFailed => "未运行：{error}",
+        L10nKey::SettingsMobileStartFailed => "手机访问没能启动：{error}",
+        L10nKey::SettingsMobileNoAnswer => {
+            "tty7 server 没有启动它。请在 设置 → 关于 中重启 server 后再试。"
+        }
+        L10nKey::SettingsMobilePair => "配对手机",
+        L10nKey::SettingsMobileShowCode => "显示配对码",
+        L10nKey::SettingsMobilePairDesc => "生成一个一次性配对码，给手机上的 tty7 app 用。",
+        L10nKey::SettingsMobilePairNeedsAccess => "请先打开手机访问。",
+        L10nKey::SettingsMobilePairScan => "用手机上的 tty7 app 扫描，或者复制配对码粘贴过去。",
+        L10nKey::SettingsMobilePairValid => "10 分钟内有效，只能配对一台手机。",
+        L10nKey::SettingsMobileCopyCode => "复制配对码",
+        L10nKey::SettingsMobilePaired => "已与 {name} 配对。",
+        L10nKey::SettingsMobilePhones => "已配对的手机",
+        L10nKey::SettingsMobileNoPhones => "还没有配对过手机。",
+        L10nKey::SettingsMobileUnpair => "取消配对",
+        L10nKey::SettingsSearchMobileKeywords => {
+            "手机 移动 iphone android ipad 配对 二维码 远程 访问"
+        }
         L10nKey::SettingsCopySshCommand => "复制 ssh 命令",
         L10nKey::SettingsStoredInTty7 => "保存在 tty7 设置中",
         L10nKey::SettingsClickAgainToRemove => "再次点击以删除",
@@ -1421,6 +1446,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteNoticeDisconnected => "未连接——输入无效",
         L10nKey::RemoteActionRetryNow => "立即重试",
         L10nKey::RemoteActionTakeBack => "收回",
+        L10nKey::PaneLeasedBy => "正在 {by} 上使用，按它的屏幕尺寸显示",
         L10nKey::RemoteActionConnect => "连接",
         L10nKey::RemoteActionRetry => "重试",
         L10nKey::RemoteActionRemoveEntry => "移除条目",
