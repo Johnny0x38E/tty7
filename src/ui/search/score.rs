@@ -195,6 +195,13 @@ mod tests {
     }
 
     #[test]
+    fn the_remote_files_panel_is_found_as_sftp() {
+        let cmd =
+            Item::localized(L10nKey::CmdSshRemoteFiles, CommandKind::ToggleSftp).with_alias("SFTP");
+        assert!(item_score("sftp", &cmd).is_some());
+    }
+
+    #[test]
     fn letters_strewn_across_a_description_do_not_match_it() {
         let cmd = Item::new("Git: Discard All Changes", CommandKind::NewTab)
             .with_subtitle("Throws away every uncommitted change in the working tree.".to_string());
