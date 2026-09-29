@@ -117,6 +117,7 @@ pub(crate) fn relative_time(now: u64, then: u64) -> String {
 /// about those (#580). `None` shows the path in full.
 pub(crate) fn display_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
     let text = path.to_string_lossy();
+    let text = crate::ui::path_display::readable_path(&text);
     // Same home-abbreviation the Info panel and tab strip use: separators
     // normalized, case folded (#544).
     let shortened = crate::ui::path_display::abbreviate_home(&text, home).into_owned();

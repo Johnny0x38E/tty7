@@ -337,6 +337,7 @@ impl Tty7App {
             })
             .display()
             .to_string();
+        let preview = crate::ui::path_display::readable_path(&preview).into_owned();
         let mono = cx.theme().mono_font_family.clone();
         let meta = move |text: String| {
             div()
