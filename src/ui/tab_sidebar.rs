@@ -1102,23 +1102,26 @@ impl Tty7App {
                         let mut fade_from = backing;
                         fade_from.a = 0.;
                         row.child(
+                            // The row's full height, not the button's: on a
+                            // two-line row the diff count sits under the
+                            // button's band, and a band-high backing left the
+                            // bottom of "+2" showing beneath the ×.
                             h_flex()
                                 .absolute()
-                                .top(px((row_h - crate::ui::tab_strip::MIN_TARGET) / 2.))
+                                .top_0()
+                                .bottom_0()
                                 .right(px(6.))
                                 .opacity(0.)
                                 .group_hover(SharedString::from(format!("tab-row-{i}")), |s| {
                                     s.opacity(1.)
                                 })
-                                .child(div().w(px(10.)).h(px(crate::ui::tab_strip::MIN_TARGET)).bg(
-                                    linear_gradient(
-                                        90.,
-                                        linear_color_stop(fade_from, 0.),
-                                        linear_color_stop(backing, 1.),
-                                    ),
-                                ))
+                                .child(div().w(px(10.)).h_full().bg(linear_gradient(
+                                    90.,
+                                    linear_color_stop(fade_from, 0.),
+                                    linear_color_stop(backing, 1.),
+                                )))
                                 .child(
-                                    div().bg(backing).child(
+                                    div().h_full().flex().items_center().bg(backing).child(
                                         crate::ui::tab_strip::hit_target(
                                             Button::new(("sidebar-close", i))
                                                 .icon(IconName::Close)
