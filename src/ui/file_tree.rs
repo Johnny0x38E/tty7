@@ -2008,6 +2008,14 @@ impl Tty7App {
         });
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
+            .role(gpui::Role::TreeItem)
+            .aria_label(SharedString::from(
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string()),
+            ))
+            .aria_selected(selected)
+            .when(is_dir, |r| r.aria_expanded(row.expanded))
             .items_center()
             .gap(px(TREE_GAP))
             .h(px(TREE_ROW_H))

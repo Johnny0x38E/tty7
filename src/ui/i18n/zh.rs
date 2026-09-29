@@ -239,6 +239,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavKeybindings => "快捷键",
         L10nKey::SettingsNavAbout => "关于",
         L10nKey::SettingsHeader => "设置",
+        L10nKey::SettingsWindowTitle => "设置",
         L10nKey::Reset => "重置",
         L10nKey::Save => "保存",
         L10nKey::Connect => "连接",

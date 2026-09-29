@@ -292,6 +292,7 @@ l10n_keys! {
     SettingsNavKeybindings,
     SettingsNavAbout,
     SettingsHeader,
+    SettingsWindowTitle,
     Reset,
     Save,
     Connect,

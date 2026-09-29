@@ -283,6 +283,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavKeybindings => "キーボードショートカット",
         L10nKey::SettingsNavAbout => "情報",
         L10nKey::SettingsHeader => "設定",
+        L10nKey::SettingsWindowTitle => "設定",
         L10nKey::Reset => "リセット",
         L10nKey::Save => "保存",
         L10nKey::Connect => "接続",

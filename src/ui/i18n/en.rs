@@ -266,6 +266,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNavKeybindings => "Keyboard shortcuts",
         L10nKey::SettingsNavAbout => "About",
         L10nKey::SettingsHeader => "SETTINGS",
+        L10nKey::SettingsWindowTitle => "Settings",
         L10nKey::Reset => "Reset",
         L10nKey::Save => "Save",
         L10nKey::Connect => "Connect",

@@ -1140,6 +1140,9 @@ impl Tty7App {
                     "settings-nav-{}",
                     target.profile_label()
                 )))
+                .role(gpui::Role::Tab)
+                .aria_label(t(target.title()))
+                .aria_selected(active)
                 .h(px(28.))
                 .px(px(8.))
                 .gap(px(10.))
