@@ -464,8 +464,22 @@ fn what_was_asked_for(segments: Vec<CaptureSegment>, scrollback: bool) -> Vec<Ca
         .filter(|segment| !segment.bytes.is_empty())
         .collect();
     if !scrollback {
-        // Only the newest segment, which is the one holding the screen.
-        segments.drain(..segments.len().saturating_sub(1));
+        // Only the newest segment, which is the one holding the screen — but
+        // in the modes the segments before it left on. A resize while `vim`
+        // is open starts the newest segment inside the alternate screen, and
+        // replayed from the ground state its redraws landed on the main
+        // screen, so `vim`'s `~` column still read as the pane's text after it
+        // had exited.
+        let dropped = segments.len().saturating_sub(1);
+        let mut modes = tty7_core::core::term_modes::TerminalModes::new();
+        for segment in segments.drain(..dropped) {
+            modes.feed(&segment.bytes);
+        }
+        if let (Some(restore), Some(newest)) = (modes.restore_bytes(), segments.first_mut()) {
+            let mut bytes = restore;
+            bytes.extend_from_slice(&newest.bytes);
+            newest.bytes = bytes;
+        }
     }
     segments
 }
@@ -575,6 +589,24 @@ mod tests {
             "the fix must not reach past a segment that does hold the screen"
         );
         assert_eq!(what_was_asked_for(replay.clone(), true), replay);
+    }
+
+    #[test]
+    fn a_resize_inside_a_full_screen_program_keeps_its_screen_off_the_capture() {
+        // `vim` opened, the pane was resized, `vim` redrew and exited: the
+        // newest segment starts inside the alternate screen.
+        let replay = vec![
+            seg(100, b"$ vim\r\n\x1b[?1049h~\r\n~\r\n"),
+            seg(80, b"\x1b[H~\r\n~\r\n\x1b[?1049l$ "),
+        ];
+        let newest = what_was_asked_for(replay, false);
+        assert_eq!(newest.len(), 1);
+        let text = crate::screen::render(&newest);
+        assert!(
+            !text.contains('~'),
+            "vim's screen leaked into the capture: {text:?}"
+        );
+        assert!(text.contains('$'));
     }
 
     #[test]
