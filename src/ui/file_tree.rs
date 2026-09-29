@@ -2084,6 +2084,20 @@ impl Tty7App {
                     }
                 }),
             )
+            // A row opens on the press, not the click, so it has no click
+            // handler for assistive technology's "press" to reach. Give it
+            // the same act directly, or VoiceOver could select a file and
+            // never open it.
+            .on_a11y_action(gpui::AccessibleAction::Click, {
+                let path = path.clone();
+                let app = cx.entity().downgrade();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.file_tree.focus_handle.focus(window, cx);
+                        this.file_tree_activate(&path, is_dir, window, cx);
+                    });
+                }
+            })
             // The menu acts on the row it was opened on, so that row is the
             // one lit while it is up (#942) — selected without being opened,
             // the way Explorer and every editor's tree do it.

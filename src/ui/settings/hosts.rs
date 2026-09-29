@@ -447,6 +447,12 @@ impl Tty7App {
 
         let head = div()
             .id(SharedString::from(format!("ssh-host-{}", id.as_u128())))
+            .role(gpui::Role::Button)
+            .aria_label(match address.is_empty() {
+                true => title.clone(),
+                false => format!("{title}, {address}"),
+            })
+            .aria_expanded(open)
             .h(px(40.))
             .px(px(10.))
             .flex()

@@ -1072,6 +1072,16 @@ impl Tty7App {
             _ => t(L10nKey::CmdCopy),
         };
 
+        // "cwd, /tmp/project": the row as one line. The path drawn is split
+        // and may be elided; this is the whole of it.
+        let a11y_name = format!(
+            "{}, {}",
+            row.label,
+            match &row.value {
+                InfoValue::Text(v) | InfoValue::Path(v) => v.clone(),
+                InfoValue::Diff { added, removed, .. } => format!("+{added} −{removed}"),
+            }
+        );
         let value = match row.value {
             // A path identifies a pane by its last segment, and plain
             // truncation eats exactly that: a deep checkout read
@@ -1212,6 +1222,8 @@ impl Tty7App {
 
         h_flex()
             .id(id.clone())
+            .role(gpui::Role::Label)
+            .aria_label(a11y_name)
             .group(id)
             .relative()
             .items_center()

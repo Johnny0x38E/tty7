@@ -3443,6 +3443,8 @@ impl Tty7App {
         let muted = cx.theme().muted_foreground;
         let close = div()
             .id(("editor-file-tab-close", pos))
+            .role(gpui::Role::Button)
+            .aria_label(format!("{} {name}", t(L10nKey::Close)))
             .flex_none()
             .size(px(slot))
             .flex()
@@ -3474,6 +3476,12 @@ impl Tty7App {
             });
         div()
             .id(("editor-file-tab", pos))
+            .role(gpui::Role::Tab)
+            .aria_label(match dirty {
+                true => format!("{name}, {}", t(L10nKey::SettingsUnsaved)),
+                false => name.to_string(),
+            })
+            .aria_selected(active)
             .group(group.clone())
             .occlude()
             .flex_none()
