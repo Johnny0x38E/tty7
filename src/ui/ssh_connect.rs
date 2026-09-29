@@ -429,7 +429,7 @@ fn build_spec_inner(
     NativeSshSpec {
         host: profile.host.clone(),
         port: profile.port,
-        user: profile.user.clone(),
+        user: crate::core::ssh_profile::login_user(&profile.user),
         auth_mode: map_auth_mode(profile.auth),
         identity_files,
         agent_forward: profile.agent_forward,
