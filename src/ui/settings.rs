@@ -2635,6 +2635,17 @@ impl Tty7App {
     pub(crate) fn add_new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let profile = SshProfile::new(String::new());
         self.ssh_form_load(&profile, window, cx);
+        // A blank form is there to be typed into: land on its first field
+        // rather than leave the keystrokes with nothing to go to. (A form held
+        // back behind an unsaved-edits prompt has not opened yet, and is not
+        // this profile's.)
+        let first = self
+            .ssh_form_mut()
+            .filter(|form| form.editing == profile.id)
+            .map(|form| form.name.clone());
+        if let Some(first) = first {
+            first.update(cx, |state, cx| state.focus(window, cx));
+        }
     }
 
     fn delete_profile_confirmed(&mut self, id: Uuid, cx: &mut Context<Self>) {
@@ -3427,7 +3438,7 @@ mod tests {
             ssh_group_label(crate::core::ssh_config::IMPORTED_GROUP),
             "~/.ssh/config"
         );
-        assert_eq!(ssh_group_label(""), "In tty7");
+        assert_eq!(ssh_group_label(""), "tty7 settings");
         assert_eq!(ssh_group_label("Work"), "Work");
     }
 

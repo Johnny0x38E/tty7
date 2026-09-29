@@ -333,7 +333,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "对所有主机生效",
         L10nKey::SettingsNoSavedHosts => "还没有保存的主机。",
         L10nKey::SettingsNothingMatches => "没有匹配 {query} 的内容。",
-        L10nKey::SettingsInTty7 => "在 tty7 中",
+        L10nKey::SettingsInTty7 => "tty7 设置",
         L10nKey::SettingsImportFromSshConfig => "从 ~/.ssh/config 导入",
         L10nKey::SettingsExpandAllGroups => "展开所有分组",
         L10nKey::SettingsNoHostsYet => "还没有主机",
