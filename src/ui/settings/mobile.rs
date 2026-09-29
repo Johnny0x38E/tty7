@@ -320,7 +320,17 @@ impl Tty7App {
         let pairing = self
             .active_settings()
             .and_then(|s| s.mobile_pairing.as_ref());
-        let paired = self.active_settings().and_then(|s| s.mobile_paired.clone());
+        // Only while that phone is still on the list: unpairing it left
+        // "Paired with probe." above an empty "No phones paired yet."
+        let paired = self
+            .active_settings()
+            .and_then(|s| s.mobile_paired.clone())
+            .filter(|name| {
+                state
+                    .as_ref()
+                    .and_then(|state| state.devices().ok())
+                    .is_some_and(|devices| devices.iter().any(|d| &d.name == name))
+            });
         // A spent code carries its own "New code" beside the reason it is
         // spent; a second one up here would be the same button twice.
         let pair_button = if pairing.is_some_and(|p| p.spent.is_some()) {
