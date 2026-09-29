@@ -1130,6 +1130,8 @@ impl Tty7App {
             .collect();
         let total: usize = counts.iter().map(|(_, n)| n).sum();
         let search_focused = self.settings_input_focused(&search, cx);
+        // Same rail, same rungs as the main window's tab list.
+        let rail = cx.global::<presets::Surfaces>().rail;
 
         let items = counts.into_iter().map(|(target, count)| {
             let active = !searching && section == target;
@@ -1144,8 +1146,8 @@ impl Tty7App {
                 .items_center()
                 .rounded(px(7.))
                 .cursor_pointer()
-                .when(active, |r| r.bg(tk.k07))
-                .when(!active, |r| r.hover(move |s| s.bg(tk.k04)))
+                .when(active, |r| r.bg(gpui::rgb(rail.selected)))
+                .when(!active, |r| r.hover(move |s| s.bg(gpui::rgb(rail.hover))))
                 .child(
                     Icon::empty()
                         .path(target.icon_path())
@@ -1181,7 +1183,7 @@ impl Tty7App {
             // The main window's tab rail fill, so the two sidebars read as the
             // same surface. Opaque: the rail's translucency rule would let the
             // page behind show through.
-            .bg(gpui::rgb(cx.global::<presets::Surfaces>().rail.base))
+            .bg(gpui::rgb(rail.base))
             .border_r_1()
             .border_color(tk.k08)
             .child(div().h(px(TITLE_BAR_HEIGHT)).flex_shrink_0())
