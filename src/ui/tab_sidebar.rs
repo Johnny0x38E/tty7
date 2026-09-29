@@ -1736,6 +1736,7 @@ impl Tty7App {
                         cx,
                     )
                     .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                    .accessible_label(t(L10nKey::TabTooltipHideSidebar))
                     .tooltip_element(crate::ui::tab_strip::chord_tooltip(
                         t(L10nKey::TabTooltipHideSidebar),
                         "ToggleLeftPanel",

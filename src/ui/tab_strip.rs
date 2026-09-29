@@ -1349,6 +1349,7 @@ impl Tty7App {
                     .w_full()
                     .h(px(28.))
                     .rounded(px(7.))
+                    .accessible_label(t(L10nKey::HomeSwitchWorkspace))
                     .tooltip_element(chord_tooltip(
                         t(L10nKey::HomeSwitchWorkspace),
                         "ToggleSwitcher",
@@ -1398,6 +1399,10 @@ impl Tty7App {
                         cx,
                     )
                     .rounded_lg()
+                    .accessible_label(match panel_open {
+                        true => t(L10nKey::TabTooltipHideDetailPanel),
+                        false => t(L10nKey::TabTooltipShowDetailPanel),
+                    })
                     .tooltip_element(chord_tooltip(
                         match panel_open {
                             true => t(L10nKey::TabTooltipHideDetailPanel),
@@ -1829,6 +1834,7 @@ impl Tty7App {
         // come through here were the ones left silent. The chord is worth
         // more here than anywhere else in the row: it is the way back to
         // opening a tab without reading a menu first.
+        .accessible_label(t(L10nKey::AppMenuNewTab))
         .tooltip_element(chord_tooltip(t(L10nKey::AppMenuNewTab), "NewTab", cx))
         // Built when the menu opens, not when the strip draws: this
         // closure runs once per press, and again after each dismissal.
@@ -2549,6 +2555,7 @@ impl Tty7App {
                             cx,
                         )
                         .rounded_lg()
+                        .accessible_label(t(L10nKey::TabTooltipShowSidebar))
                         .tooltip_element(chord_tooltip(
                             t(L10nKey::TabTooltipShowSidebar),
                             "ToggleLeftPanel",
