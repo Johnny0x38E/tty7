@@ -1227,6 +1227,8 @@ impl Tty7App {
             },
         );
         name.update(cx, |state, cx| state.focus(window, cx));
+        // The name is a suggestion to replace, not text to type in front of.
+        crate::ui::prefill::select_all_when_drawn(&name, window, cx);
         if let Some(sw) = self.switcher.as_mut() {
             sw.page = Page::Create(CreateForm {
                 name,
@@ -1336,6 +1338,9 @@ impl Tty7App {
             }
             host.update(cx, |state, cx| state.set_value("", window, cx));
             name.update(cx, |state, cx| state.focus(window, cx));
+            if untouched {
+                crate::ui::prefill::select_all_when_drawn(&name, window, cx);
+            }
         }
         cx.notify();
     }
