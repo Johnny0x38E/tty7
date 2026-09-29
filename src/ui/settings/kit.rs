@@ -179,6 +179,9 @@ pub(crate) struct Switch {
     disabled: bool,
     small: bool,
     handler: Option<ToggleHandler>,
+    /// The name a screen reader gives the switch, where no settings row
+    /// around it already says what it is.
+    label: Option<SharedString>,
 }
 
 pub(crate) fn switch(id: impl Into<ElementId>) -> Switch {
@@ -188,6 +191,7 @@ pub(crate) fn switch(id: impl Into<ElementId>) -> Switch {
         disabled: false,
         small: false,
         handler: None,
+        label: None,
     }
 }
 
@@ -198,6 +202,10 @@ impl Switch {
     }
     pub(crate) fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+    pub(crate) fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
         self
     }
     pub(crate) fn small(mut self) -> Self {
@@ -222,6 +230,13 @@ impl RenderOnce for Switch {
         let left = if on { w - knob - 2. } else { 2. };
         div()
             .id(self.id)
+            .role(gpui::Role::Switch)
+            .when_some(self.label, |d, label| d.aria_label(label))
+            .aria_toggled(if on {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
             .flex_shrink_0()
             .relative()
             .w(px(w))

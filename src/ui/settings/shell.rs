@@ -433,6 +433,14 @@ impl Tty7App {
         let tk = Tk::of(cx);
         let label = label.into();
         let desc = desc.into();
+        // A screen reader enters the row as a group named by the setting, so
+        // the control inside it — a switch, a dropdown — is heard with the
+        // name it belongs to rather than as a bare "switch, off".
+        let a11y_name = match desc.is_empty() {
+            true => label.clone(),
+            false => format!("{label}. {desc}"),
+        };
+        let reset_name = format!("{} {label}", t(L10nKey::Reset));
         let entry = settings_search_entries()
             .iter()
             .find(|entry| t(entry.title) == label);
@@ -483,6 +491,8 @@ impl Tty7App {
                     line.child(
                         div()
                             .id(SharedString::from(format!("reset-setting-{key:?}")))
+                            .role(gpui::Role::Button)
+                            .aria_label(reset_name.clone())
                             .flex_shrink_0()
                             .text_size(fs(11.5))
                             .text_color(tk.k4)
@@ -518,6 +528,8 @@ impl Tty7App {
             });
         let row = div()
             .id(element_id)
+            .role(gpui::Role::Group)
+            .aria_label(a11y_name)
             .flex()
             .when(stacked, |row| row.flex_col().items_start().gap(px(8.)))
             .when(!stacked, |row| {
@@ -1264,6 +1276,7 @@ impl Tty7App {
                         })
                         .child(
                             kit::switch("settings-modified-switch")
+                                .label(t(L10nKey::SettingsModifiedOnly))
                                 .small()
                                 .checked(modified_only),
                         )
