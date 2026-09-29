@@ -981,6 +981,11 @@ impl Tty7App {
 
                 let row = h_flex()
                     .id(("tab-row", i))
+                    // What a screen reader announces and presses: the full
+                    // title, not the elided one drawn.
+                    .role(gpui::Role::Tab)
+                    .aria_label(SharedString::from(title_text.to_string()))
+                    .aria_selected(is_active)
                     .group(SharedString::from(format!("tab-row-{i}")))
                     .cursor_pointer()
                     .on_drag(DragTab, {

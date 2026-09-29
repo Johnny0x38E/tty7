@@ -1441,6 +1441,9 @@ impl Tty7App {
                 };
                 div()
                     .id(("right-panel-tab", tab as usize))
+                    .role(gpui::Role::Tab)
+                    .aria_label(t(label_key))
+                    .aria_selected(current)
                     // The press must not start a window drag from the title bar
                     // the tabs sit in.
                     .occlude()
