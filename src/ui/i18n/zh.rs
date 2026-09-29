@@ -248,7 +248,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsThemeIntroDesc => "每个主题自带浅色或深色外观。",
         L10nKey::SettingsTypography => "字体排版",
         L10nKey::SettingsFontSize => "终端字号",
-        L10nKey::SettingsFontSizeDesc => "终端文字大小（像素）。",
+        L10nKey::SettingsFontSizeDesc => "终端文字大小（磅）。",
         L10nKey::SettingsUiFontSize => "界面字号",
         L10nKey::SettingsUiFontSizeDesc => "标签页、面板、设置等非终端文字的大小。",
         L10nKey::SettingsUiFontFamily => "界面字体",

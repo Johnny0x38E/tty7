@@ -19,7 +19,7 @@ mod loopback;
 pub mod palette;
 pub(crate) mod pane_liveness;
 pub(crate) mod parked_cursor;
-mod prompt_reflow;
+pub(crate) mod prompt_reflow;
 mod remote;
 mod reverse_search;
 pub(crate) mod scrollbar;

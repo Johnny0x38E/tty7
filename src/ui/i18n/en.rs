@@ -275,7 +275,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsThemeIntroDesc => "Each theme sets its own light or dark look.",
         L10nKey::SettingsTypography => "Typography",
         L10nKey::SettingsFontSize => "Terminal font size",
-        L10nKey::SettingsFontSizeDesc => "Terminal text size in pixels.",
+        L10nKey::SettingsFontSizeDesc => "Terminal text size in points.",
         L10nKey::SettingsUiFontSize => "Interface font size",
         L10nKey::SettingsUiFontSizeDesc => "Text size for tabs, panels and settings.",
         L10nKey::SettingsUiFontFamily => "Interface font",

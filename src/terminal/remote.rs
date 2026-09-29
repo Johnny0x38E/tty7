@@ -14,6 +14,7 @@ use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
 use crate::terminal::command_cursor::{CommandCursorStyle, CommandMark};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
+use crate::terminal::prompt_reflow::{PromptBreak, PromptMark};
 
 use std::collections::VecDeque;
 
@@ -1239,6 +1240,7 @@ impl RemoteTerminal {
                 // against the bytes before its `D`, not the whole batch.
                 let mut command_tok = OscTokenizer::new(&[b"133"]);
                 let mut command_cursor = CommandCursorStyle::default();
+                let mut prompt_break = PromptBreak::default();
                 let mut pending: Vec<u8> = buffered;
                 // Kitty-graphics decode runs on its own thread with newest-frame
                 // coalescing (issue #213): inflating a full-window browser frame
@@ -1334,6 +1336,9 @@ impl RemoteTerminal {
                                             }
                                             ReaderCut::Command(mark) => {
                                                 command_cursor.apply(term, mark)
+                                            }
+                                            ReaderCut::Prompt(mark) => {
+                                                prompt_break.apply(term, mark)
                                             }
                                         },
                                     ) else {
@@ -1472,8 +1477,14 @@ impl RemoteTerminal {
                                 command_cuts(&mut command_tok, &bytes, &mut cuts);
                                 let fed =
                                     feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
-                                        if let ReaderCut::Command(mark) = cut {
-                                            command_cursor.apply(term, mark);
+                                        match cut {
+                                            ReaderCut::Command(mark) => {
+                                                command_cursor.apply(term, mark)
+                                            }
+                                            ReaderCut::Prompt(mark) => {
+                                                prompt_break.apply(term, mark)
+                                            }
+                                            ReaderCut::Parked(_) => {}
                                         }
                                     });
                                 if fed.is_none() {
@@ -3501,6 +3512,7 @@ mod chunking_tests {
 enum ReaderCut {
     Parked(CursorCut),
     Command(CommandMark),
+    Prompt(PromptMark),
 }
 
 /// Adds the batch's command marks to `cuts`, keeping them in stream order
@@ -3510,6 +3522,8 @@ fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, Rea
     tok.feed_at(bytes, |off, payload| {
         if let Some(mark) = CommandMark::parse(payload) {
             cuts.push((off, ReaderCut::Command(mark)));
+        } else if let Some(mark) = PromptMark::parse(payload) {
+            cuts.push((off, ReaderCut::Prompt(mark)));
         }
     });
     if before > 0 && cuts.len() > before {
