@@ -191,6 +191,7 @@ pub struct Config {
     pub keybinding_preset: String,
     #[serde(default = "default_prefix")]
     pub prefix: String,
+    #[serde(default, deserialize_with = "de_shell")]
     pub shell: Option<ShellConfig>,
     /// Lenient on purpose: this is a hand-edited key with a nested shape, and a
     /// typo in one entry must not fail the whole `Config` and hand the user
@@ -1675,9 +1676,55 @@ where
     }))
 }
 
+/// `shell`, read the way Settings writes it: no program means the login
+/// shell. A hand-edited `"shell": { "args": ["-l"] }` — or any other shape
+/// that does not name a program — used to fail the whole file, and every other
+/// setting went with it into quarantine.
+fn de_shell<'de, D>(deserializer: D) -> Result<Option<ShellConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    match ShellConfig::deserialize(&value) {
+        Ok(shell) if !shell.program.trim().is_empty() => Ok(Some(shell)),
+        Ok(_) => Ok(None),
+        Err(e) => {
+            log::warn!("ignoring invalid shell {value}: {e}; using the login shell");
+            Ok(None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_without_a_program_is_the_login_shell_not_a_broken_file() {
+        for shell in [
+            r#"{"args": ["-l"]}"#,
+            r#"{"program": "", "args": []}"#,
+            r#"{"program": 5}"#,
+            "null",
+        ] {
+            let text = format!(r#"{{"font_size": 17.0, "shell": {shell}}}"#);
+            let cfg: Config = serde_json::from_str(&text).expect("the file still parses");
+            assert_eq!(cfg.shell, None, "{shell}");
+            assert_eq!(cfg.font_size, 17.0, "the rest of the file is kept");
+        }
+        let cfg: Config =
+            serde_json::from_str(r#"{"shell": {"program": "fish", "args": ["-l"]}}"#).unwrap();
+        assert_eq!(
+            cfg.shell,
+            Some(ShellConfig {
+                program: "fish".into(),
+                args: vec!["-l".into()]
+            })
+        );
+    }
 
     #[test]
     fn profile_usage_score_ranks_frequency_and_recency() {
