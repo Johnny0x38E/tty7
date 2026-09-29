@@ -363,66 +363,71 @@ impl Tty7App {
         let start = (!p.agents.is_empty()).then(|| self.render_worktree_start(p, cx));
 
         let rungs = dialog::popover_rungs(cx);
-        let card = dialog::card(440., cx)
-            .child(dialog::header(t(L10nKey::WorktreePromptTitle), cx))
-            .child(
-                dialog::body()
-                    // A click anywhere else in the form closes the Start menu.
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
-                            this.close_worktree_start_menu(cx)
-                        }),
-                    )
-                    // The path preview hangs off the Name field it follows,
-                    // closer to it than the next field is.
-                    .child(
-                        dialog::labelled(t(L10nKey::WorktreePromptName), Input::new(&p.name), cx)
-                            .child(meta(preview)),
-                    )
-                    .child(dialog::labelled(
-                        t(L10nKey::WorktreePromptBranch),
-                        Input::new(&p.branch),
-                        cx,
-                    ))
-                    .child(
-                        dialog::labelled(t(L10nKey::WorktreePromptBase), Input::new(&p.base), cx)
-                            .children(setup_note.map(meta)),
-                    )
-                    .children(start)
-                    .when(takes_task, |body| {
-                        body.child(dialog::labelled(
-                            t(L10nKey::WorktreePromptTask),
-                            Input::new(&p.task),
-                            cx,
-                        ))
+        let card = dialog::card(
+            "worktree-prompt-card",
+            t(L10nKey::WorktreePromptTitle),
+            440.,
+            cx,
+        )
+        .child(dialog::header(t(L10nKey::WorktreePromptTitle), cx))
+        .child(
+            dialog::body()
+                // A click anywhere else in the form closes the Start menu.
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                        this.close_worktree_start_menu(cx)
                     }),
-            )
-            .child(
-                dialog::footer(cx)
-                    .child(dialog::button(
-                        "worktree-cancel",
-                        t(L10nKey::Cancel),
-                        Tone::Secondary,
-                        true,
-                        rungs,
+                )
+                // The path preview hangs off the Name field it follows,
+                // closer to it than the next field is.
+                .child(
+                    dialog::labelled(t(L10nKey::WorktreePromptName), Input::new(&p.name), cx)
+                        .child(meta(preview)),
+                )
+                .child(dialog::labelled(
+                    t(L10nKey::WorktreePromptBranch),
+                    Input::new(&p.branch),
+                    cx,
+                ))
+                .child(
+                    dialog::labelled(t(L10nKey::WorktreePromptBase), Input::new(&p.base), cx)
+                        .children(setup_note.map(meta)),
+                )
+                .children(start)
+                .when(takes_task, |body| {
+                    body.child(dialog::labelled(
+                        t(L10nKey::WorktreePromptTask),
+                        Input::new(&p.task),
                         cx,
-                        cx.listener(|this, _, window, cx| this.cancel_worktree_prompt(window, cx)),
                     ))
-                    .child(dialog::button(
-                        "worktree-create",
-                        if p.busy {
-                            t(L10nKey::WorktreePromptCreating)
-                        } else {
-                            t(L10nKey::WorktreePromptCreate)
-                        },
-                        Tone::Primary,
-                        !(p.busy || nothing_to_name),
-                        rungs,
-                        cx,
-                        cx.listener(|this, _, window, cx| this.submit_worktree_prompt(window, cx)),
-                    )),
-            );
+                }),
+        )
+        .child(
+            dialog::footer(cx)
+                .child(dialog::button(
+                    "worktree-cancel",
+                    t(L10nKey::Cancel),
+                    Tone::Secondary,
+                    true,
+                    rungs,
+                    cx,
+                    cx.listener(|this, _, window, cx| this.cancel_worktree_prompt(window, cx)),
+                ))
+                .child(dialog::button(
+                    "worktree-create",
+                    if p.busy {
+                        t(L10nKey::WorktreePromptCreating)
+                    } else {
+                        t(L10nKey::WorktreePromptCreate)
+                    },
+                    Tone::Primary,
+                    !(p.busy || nothing_to_name),
+                    rungs,
+                    cx,
+                    cx.listener(|this, _, window, cx| this.submit_worktree_prompt(window, cx)),
+                )),
+        );
 
         Some(
             div()

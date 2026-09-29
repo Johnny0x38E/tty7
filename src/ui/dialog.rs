@@ -61,8 +61,19 @@ pub(crate) fn popover_rungs(cx: &App) -> Surface {
 
 /// The card itself, opaque and occluding. Callers add the header, body and
 /// footer as children, in that order.
-pub(crate) fn card(width: f32, cx: &App) -> Div {
+///
+/// `title` is what a screen reader announces the card as — a dialog, named
+/// by the question it asks.
+pub(crate) fn card(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    width: f32,
+    cx: &App,
+) -> Stateful<Div> {
     v_flex()
+        .id(id)
+        .role(gpui::Role::Dialog)
+        .aria_label(title)
         .occlude()
         .w(px(width))
         .map(|panel| crate::ui::theme::floating_surface(panel, cx))
