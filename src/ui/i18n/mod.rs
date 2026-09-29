@@ -1621,7 +1621,6 @@ l10n_keys! {
     AppWorktreeSetupSkip,
     AppWorktreeNotCarried,
     AppWorktreeRemovedBranchKept,
-    AppForkStillConnecting,
     AppPaneNoCodingAgent,
     AppForkNoCommand,
     AppForkLocalOnly,
