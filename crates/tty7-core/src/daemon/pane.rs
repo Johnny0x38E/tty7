@@ -62,9 +62,16 @@ fn default_shell_name(_cmd: &CommandBuilder) -> String {
     crate::core::shells::windows_default_shell().to_string()
 }
 
+/// The shell `cmd` will actually run. `get_shell` names the login shell
+/// whatever `cmd` holds, and the detected-shell override swaps the program
+/// for another one: tty7 launched from bash with zsh as the login shell ran
+/// bash with zsh's integration, which is none at all.
 #[cfg(not(windows))]
 fn default_shell_name(cmd: &CommandBuilder) -> String {
-    cmd.get_shell()
+    match cmd.get_argv().first() {
+        Some(program) if !cmd.is_default_prog() => program.to_string_lossy().into_owned(),
+        _ => cmd.get_shell(),
+    }
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -4246,7 +4253,8 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(argv, vec![detected_shell]);
+        assert_eq!(argv, vec![detected_shell.clone()]);
+        assert_eq!(default_shell_name(&cmd), detected_shell);
     }
 
     #[cfg(not(windows))]
