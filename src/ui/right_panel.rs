@@ -948,9 +948,20 @@ impl Tty7App {
                         reveal: local.then(|| cwd.clone()),
                     });
                 }
+                // A pane on the default shell runs whatever the server picked,
+                // which is not always the login shell the inventory names: a
+                // server started from bash spawns bash. The process at the root
+                // of the pane's tree is the shell itself, so it has the say
+                // once the tree is in.
+                let root = self
+                    .procs(pane_id)
+                    .and_then(|p| p.procs.first())
+                    .filter(|p| p.depth == 0)
+                    .map(|p| p.name.trim_start_matches('-').to_string())
+                    .filter(|name| !name.is_empty());
                 let shell = match view.shell_spec().map(|s| s.program.clone()) {
                     Some(program) => crate::core::shells::default_shell_name(Some(&program)),
-                    None => self.default_shell_label(cx),
+                    None => root.unwrap_or_else(|| self.default_shell_label(cx)),
                 };
                 rows.push(InfoRow::text(t(L10nKey::PanelShell), shell));
                 if let Some(ssh) = view.ssh_spec() {
