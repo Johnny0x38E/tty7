@@ -1622,6 +1622,13 @@ impl Tty7App {
         })
         .detach();
 
+        // With focus on nothing, or on a handle whose element is gone (a panel
+        // closed under it, a context menu that dismissed), gpui dispatches keys
+        // on the window root alone, one level above every listener on
+        // `tty7-root`, and ⌘P, ⌘T, ⌘W and the rest go dead.
+        cx.on_focus_lost(window, |this, window, cx| this.focus_active(window, cx))
+            .detach();
+
         // The home page's cursor, on the terminal's own schedule. It ticks
         // whether or not the page is up — a timer that wakes twice a second to
         // compare a `Vec`'s length against zero costs nothing — but only asks
@@ -3761,7 +3768,13 @@ impl Tty7App {
 
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut App) {
         self.sync_window_title(window, cx);
-        if let Some(settings) = self.settings.as_ref() {
+        // Only where the page is drawn: with settings in a window of its own,
+        // its handle focused in the workspace window is focus on nothing
+        // there, and every shortcut in the workspace goes dead.
+        let settings_here = self
+            .settings_window
+            .is_none_or(|(settings, _)| settings == window.window_handle());
+        if let Some(settings) = self.settings.as_ref().filter(|_| settings_here) {
             window.focus(&settings.focus_handle, cx);
             return;
         }
@@ -13086,6 +13099,140 @@ mod new_window_action_tests {
                 1,
                 "NewWindow has to reach windows::open with no window to bubble through"
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod unfocused_shortcut_tests {
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use crate::ui::windows::WindowRegistry;
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+
+    fn open(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view().clone().downcast::<Tty7App>().ok().unwrap()
+            })
+            .unwrap();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.run_until_parked();
+        (app, vcx)
+    }
+
+    /// Focus on a handle no element tracks — a panel that closed under it, a
+    /// field that went away — leaves gpui dispatching keys on the window root
+    /// alone, and `Tty7App`'s listeners sit one level below that. The
+    /// shortcuts have to answer anyway.
+    fn answers_with_focus_off_the_tree(
+        action: &str,
+        opened: fn(&Tty7App) -> bool,
+        blur: bool,
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx) = open(cx);
+        let key = vcx
+            .update(|_, cx| crate::ui::keymap::effective_key(action, cx))
+            .unwrap();
+        vcx.update(|window, cx| {
+            if blur {
+                window.blur();
+            } else {
+                let orphan = cx.focus_handle();
+                window.focus(&orphan, cx);
+                std::mem::forget(orphan);
+            }
+            window.refresh();
+        });
+        vcx.run_until_parked();
+        assert!(!app.read_with(&vcx, |app, _| opened(app)));
+        vcx.simulate_keystrokes(&key);
+        vcx.run_until_parked();
+        assert!(
+            app.read_with(&vcx, |app, _| opened(app)),
+            "{action} ({key}) did nothing with focus off Tty7App's tree (blur: {blur})"
+        );
+    }
+
+    #[gpui::test]
+    fn palette_with_app_focus(cx: &mut TestAppContext) {
+        let (app, mut vcx) = open(cx);
+        let key = vcx
+            .update(|_, cx| crate::ui::keymap::effective_key("TogglePalette", cx))
+            .unwrap();
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes(&key);
+        vcx.run_until_parked();
+        assert!(app.read_with(&vcx, |app, _| app.search.is_some()));
+    }
+
+    #[gpui::test]
+    fn palette_after_blur(cx: &mut TestAppContext) {
+        answers_with_focus_off_the_tree("TogglePalette", |a| a.search.is_some(), true, cx);
+    }
+
+    #[gpui::test]
+    fn palette_with_orphan_focus(cx: &mut TestAppContext) {
+        answers_with_focus_off_the_tree("TogglePalette", |a| a.search.is_some(), false, cx);
+    }
+
+    #[gpui::test]
+    fn switcher_with_orphan_focus(cx: &mut TestAppContext) {
+        answers_with_focus_off_the_tree("ToggleSwitcher", |a| a.switcher.is_some(), false, cx);
+    }
+
+    #[gpui::test]
+    fn settings_with_orphan_focus(cx: &mut TestAppContext) {
+        answers_with_focus_off_the_tree("OpenSettings", |a| a.settings.is_some(), false, cx);
+    }
+
+    /// With settings up in a window of its own, the workspace window's focus
+    /// comes back to its own panes — the page's handle is drawn elsewhere.
+    #[gpui::test]
+    fn settings_in_its_own_window_leaves_the_workspace_its_focus(cx: &mut TestAppContext) {
+        let (app, mut vcx) = open(cx);
+        let elsewhere = cx.add_window(|_, _| gpui::EmptyView);
+        app.update_in(&mut vcx, |app, window, cx| {
+            // Tests build the page in place; point it at the other window, as
+            // a real ⌘, does.
+            app.toggle_settings(window, cx);
+            app.settings_window = Some((elsewhere.into(), window.window_handle()));
+            let orphan = cx.focus_handle();
+            window.focus(&orphan, cx);
+            std::mem::forget(orphan);
+            window.refresh();
+        });
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            let expected = match app.tabs.get(app.active) {
+                Some(tab) => tab.focus_target().unwrap().focus_handle(cx),
+                None => app.home_focus.clone(),
+            };
+            assert!(
+                !app.settings
+                    .as_ref()
+                    .unwrap()
+                    .focus_handle
+                    .is_focused(window),
+                "the workspace window must not park focus on a page it does not draw"
+            );
+            assert!(expected.is_focused(window));
         });
     }
 }
