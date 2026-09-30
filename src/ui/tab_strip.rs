@@ -1349,6 +1349,10 @@ impl Tty7App {
                     .w_full()
                     .h(px(28.))
                     .rounded(px(7.))
+                    // Button pins the arrow for every non-link variant; the
+                    // switcher's own rows point, so the tile that opens them
+                    // does too.
+                    .cursor_pointer()
                     .accessible_label(t(L10nKey::HomeSwitchWorkspace))
                     .tooltip_element(chord_tooltip(
                         t(L10nKey::HomeSwitchWorkspace),
