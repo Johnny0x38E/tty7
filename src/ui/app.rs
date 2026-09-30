@@ -998,7 +998,7 @@ pub struct Tty7App {
     /// it (where focus goes back to on close). `None` while settings is shut —
     /// and always in tests, which keep drawing settings over the workspace so
     /// they can drive it through the one test window they have.
-    settings_window: Option<(gpui::AnyWindowHandle, gpui::AnyWindowHandle)>,
+    pub(crate) settings_window: Option<(gpui::AnyWindowHandle, gpui::AnyWindowHandle)>,
     pub(crate) ssh_prompt: crate::ui::ssh_prompt::SshPromptState,
     /// A close question is on screen. It carries no target: the answer acts on
     /// the tab or pane captured when the question was raised, not on whatever
@@ -6113,7 +6113,7 @@ impl Tty7App {
         out
     }
 
-    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.is_some() {
             self.close_search(window, cx);
             return;

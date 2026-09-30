@@ -7,6 +7,7 @@ use crate::terminal::view::{
     InsertNewline, InsertNewlineFallback, PasteText,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::palette;
 use crate::ui::search::CommandGroup;
 use crate::ui::settings::humanize_action;
 use crate::ui::theme::set_menus;
@@ -38,6 +39,7 @@ pub fn init(cx: &mut App) {
     // gpui runs the window's bubble phase first and returns before the global
     // one, so the two never both fire.
     cx.on_action(|_: &NewWindow, cx: &mut App| crate::ui::windows::open(cx, None));
+    palette::init(cx);
     set_menus(cx);
 }
 

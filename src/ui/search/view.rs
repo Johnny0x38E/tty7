@@ -489,6 +489,11 @@ impl SearchView {
         }
     }
 
+    /// Puts the keyboard back in the search field (`palette`).
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.list.update(cx, |state, cx| state.focus(window, cx));
+    }
+
     /// Whether a row's list is showing rather than a tab.
     fn in_sub_list(&self) -> bool {
         self.parked_query.is_some()

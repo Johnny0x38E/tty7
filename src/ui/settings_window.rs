@@ -44,7 +44,7 @@ pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
 }
 
 pub(crate) struct SettingsWindow {
-    app: WeakEntity<Tty7App>,
+    pub(crate) app: WeakEntity<Tty7App>,
     _observe: Subscription,
     _release: Subscription,
 }
