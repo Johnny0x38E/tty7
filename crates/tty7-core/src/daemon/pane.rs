@@ -478,6 +478,13 @@ fn pane_environment(
         ),
         ("TERM_PROGRAM".to_string(), TERM_PROGRAM_NAME.to_string()),
         ("TERM_PROGRAM_VERSION".to_string(), version.to_string()),
+        // tty7 renders OSC 8 links, but `supports-hyperlinks` (Claude Code,
+        // most Node CLIs) only trusts a fixed TERM_PROGRAM list and strips
+        // them otherwise; this is the override it honours. It is checked
+        // before the isTTY test, so such a tool now writes OSC 8 into
+        // `> file` and `| less` too. `FORCE_HYPERLINK=0` in the `env` config
+        // or the shell's rc turns it back off.
+        ("FORCE_HYPERLINK".to_string(), "1".to_string()),
         (TTY7_PANE_ENV.to_string(), pane.to_string()),
     ];
     #[cfg(windows)]
@@ -7523,6 +7530,7 @@ mod tests {
         let version = env!("CARGO_PKG_VERSION");
 
         assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some("tty7"));
+        assert_eq!(env.get("FORCE_HYPERLINK").map(String::as_str), Some("1"));
         assert_eq!(
             env.get("TERM_PROGRAM_VERSION").map(String::as_str),
             Some(version)
