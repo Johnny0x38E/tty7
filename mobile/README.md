@@ -83,13 +83,35 @@ last. `--build-number 7` picks it.
 
 ### Android
 
-Needs Android Studio's SDK and NDK, with `ANDROID_HOME` and `NDK_HOME` set.
+Needs the Android SDK and NDK, with `ANDROID_HOME` and `NDK_HOME` set, and a JDK 17 to 21
+as `JAVA_HOME`.
 
 ```sh
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 cd mobile
-npm run tauri android init
-npm run tauri android dev
+npm run tauri android dev                                        # emulator or a connected phone
+npm run tauri android build -- --debug --apk --target aarch64   # an installable .apk
+```
+
+`src-tauri/gen/android` is kept in the repo, unlike `gen/apple`: its `MainActivity` hands the
+keyboard's height to the page, which the WebView does not report edge to edge. Don't re-run
+`android init` over it.
+
+To release an APK, push a `mobile-v<x.y.z>` tag, higher than the last. `.github/workflows/mobile.yml`
+builds it at that version, signs it with the release key and attaches it to a draft
+release, which is never marked latest, so the desktop updater doesn't see it. People
+download the APK on the phone and open it. A later one installs over it only if it's
+signed with the same key and its version is higher.
+
+The release key is in the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD` and
+`ANDROID_KEY_ALIAS` secrets, with a copy kept outside GitHub. A local release build signs
+with it when `src-tauri/gen/android/keystore.properties` (ignored by git) names it:
+
+```properties
+storeFile=/path/to/tty7-release.jks
+storePassword=…
+keyAlias=tty7
+keyPassword=…
 ```
 
 ### Without a phone
