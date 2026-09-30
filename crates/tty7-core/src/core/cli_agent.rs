@@ -310,6 +310,47 @@ impl CLIAgent {
         }
     }
 
+    /// A fresh start under `session_id`, for when [`Self::resume_command`]
+    /// finds nothing: Claude saves no conversation for a session that never
+    /// took a turn (or ran with transcript saving off), and resuming one
+    /// fails at once. `None` for agents that cannot name a new session.
+    pub fn start_command(self, session_id: &str, launch_argv: Option<&[String]>) -> Option<String> {
+        if self != CLIAgent::Claude || uuid::Uuid::parse_str(session_id).is_err() {
+            return None;
+        }
+        let flags = self.session_command_flags(session_id, launch_argv)?;
+        Some(format!("claude{flags} --session-id {session_id}"))
+    }
+
+    /// The line a restored pane types to bring its agent back: the resume,
+    /// falling back to [`Self::start_command`] with `||` when the pane's shell
+    /// has that operator. `shell_program` is that shell, `None` when it is not
+    /// known — then, as in a shell without `||`, the resume goes alone, since
+    /// one that cannot parse the line would not run the resume either.
+    ///
+    /// `||` fires on any failed exit, not only "no conversation found". The
+    /// other ways a resume fails fast (a flag this version rejects, no login)
+    /// fail the fresh start the same way; one that exits non-zero after the
+    /// user took turns follows with a start under an id that now has a
+    /// conversation, which Claude turns down as already in use. Telling the
+    /// cases apart would mean reading Claude's stderr, which a typed line
+    /// cannot do portably.
+    pub fn restore_command(
+        self,
+        session_id: &str,
+        launch_argv: Option<&[String]>,
+        shell_program: Option<&str>,
+    ) -> Option<String> {
+        let resume = self.resume_command(session_id, launch_argv)?;
+        let fresh = shell_program
+            .filter(|shell| crate::core::shell_quote::runs_or_list(shell))
+            .and_then(|_| self.start_command(session_id, launch_argv));
+        Some(match fresh {
+            Some(fresh) => format!("{resume} || {fresh}"),
+            None => resume,
+        })
+    }
+
     fn session_command_flags(
         self,
         session_id: &str,
@@ -1162,6 +1203,43 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_starts_fresh_under_the_same_id_with_its_flags() {
+        const ID: &str = "0b5c3a5e-6d0e-4c1f-9a4b-2f7f1d9e8c11";
+        let launched = argv(&["claude", "--model", "opus", "--session-id", ID]);
+        assert_eq!(
+            CLIAgent::Claude
+                .start_command(ID, Some(&launched))
+                .as_deref(),
+            Some(format!("claude --model opus --session-id {ID}").as_str())
+        );
+        assert_eq!(CLIAgent::Claude.start_command("not-a-uuid", None), None);
+        assert_eq!(CLIAgent::Codex.start_command(ID, None), None);
+    }
+
+    #[test]
+    fn a_restore_falls_back_to_a_fresh_start_only_where_the_shell_has_or() {
+        const ID: &str = "0b5c3a5e-6d0e-4c1f-9a4b-2f7f1d9e8c11";
+        let launched = argv(&["claude", "--model", "opus"]);
+        let resume = CLIAgent::Claude
+            .resume_command(ID, Some(&launched))
+            .unwrap();
+        let restore = |shell| CLIAgent::Claude.restore_command(ID, Some(&launched), shell);
+        let chained = format!("{resume} || claude --model opus --session-id {ID}");
+        assert_eq!(restore(Some("/bin/zsh")).as_deref(), Some(chained.as_str()));
+        assert_eq!(restore(Some("pwsh.exe")).as_deref(), Some(chained.as_str()));
+        // Windows PowerShell 5.1 and nu reject the whole line over `||`, and a
+        // shell nobody could name might be either.
+        assert_eq!(restore(Some("powershell.exe")), Some(resume.clone()));
+        assert_eq!(restore(Some("nu")), Some(resume.clone()));
+        assert_eq!(restore(None), Some(resume));
+        // Agents with no way to name a new session keep the bare resume.
+        assert_eq!(
+            CLIAgent::Codex.restore_command(ID, None, Some("bash")),
+            CLIAgent::Codex.resume_command(ID, None)
+        );
+    }
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
