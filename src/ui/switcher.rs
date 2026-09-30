@@ -294,9 +294,9 @@ pub(crate) enum Page {
     Create(CreateForm),
 }
 
-/// The "New Workspace" form: a name prefilled with what the workspace would
-/// have called itself anyway, and a host picked from a combobox that folds
-/// however many machines are configured into one row.
+/// The "New Workspace" form: a name the user has to give, and a host picked
+/// from a combobox that folds however many machines are configured into one
+/// row.
 pub(crate) struct CreateForm {
     name: Entity<InputState>,
     /// The combobox's filter text. Only meaningful while `open`.
@@ -307,10 +307,15 @@ pub(crate) struct CreateForm {
     sel: usize,
     /// The picked host. `None` is this computer.
     chosen: Option<HostChoice>,
-    /// What the name box was prefilled with. While its value still says this
-    /// (or nothing), picking another host refills it; one keystroke of the
-    /// user's own and it is theirs.
-    prefill: String,
+}
+
+impl CreateForm {
+    /// The typed name, trimmed; `None` while the box is blank, which is also
+    /// when Create stays disabled.
+    fn name(&self, cx: &App) -> Option<String> {
+        let name = self.name.read(cx).value().trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
 }
 
 /// A create the user asked for on a machine that was not connected yet: the
@@ -425,19 +430,6 @@ enum HostItem {
     /// Pinned last, filter or no filter: the way out when the machine wanted
     /// is not configured yet.
     AddHost,
-}
-
-/// What the form's name box starts out saying: the same codename a workspace
-/// created without one would have been given anyway (`fresh_workspace_name` —
-/// "quiet-otter"), rolled against the chosen machine so it stays unique
-/// there. Editable before it is spent; clearing the box creates a nameless
-/// workspace that shows its directory, the old fallback.
-fn default_workspace_name(chosen: Option<&HostChoice>, cx: &App) -> String {
-    let host = match chosen {
-        None => tty7_core::host::HostId::LOCAL,
-        Some(choice) => choice.target.host_id(),
-    };
-    crate::ui::tree_sync::fresh_workspace_name(cx, host)
 }
 
 fn host_items(hosts: Vec<HostChoice>, query: &str, local_label: &str) -> Vec<HostItem> {
@@ -1195,7 +1187,7 @@ impl Tty7App {
 
     /// `⌘⇧N` and the footer button. Raises the switcher if it is down and
     /// flips the card to the create form, host defaulting to this computer —
-    /// so `⌘⇧N` then Enter is still "a fresh local workspace", two keys.
+    /// so `⌘⇧N`, a name, then Enter is a fresh local workspace.
     pub(crate) fn open_workspace_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_none() {
             self.open_switcher(window, cx);
@@ -1209,12 +1201,20 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let prefill = default_workspace_name(chosen.as_ref(), cx);
         let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(t(L10nKey::SwitcherFormNamePlaceholder))
-                .default_value(prefill.clone())
+            InputState::new(window, cx).placeholder(t(L10nKey::SwitcherFormNamePlaceholder))
         });
+        // Create is enabled by what the box says, so the card redraws as it
+        // goes from blank to named and back.
+        let name_sub = cx.subscribe_in(
+            &name,
+            window,
+            |_this, _input, ev: &InputEvent, _window, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        );
         let host = cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::FilterHosts)));
         // Retyping the filter moves the dropdown cursor back onto the first hit.
         let sub = cx.subscribe_in(
@@ -1231,8 +1231,6 @@ impl Tty7App {
             },
         );
         name.update(cx, |state, cx| state.focus(window, cx));
-        // The name is a suggestion to replace, not text to type in front of.
-        crate::ui::prefill::select_all_when_drawn(&name, window, cx);
         if let Some(sw) = self.switcher.as_mut() {
             sw.page = Page::Create(CreateForm {
                 name,
@@ -1240,9 +1238,9 @@ impl Tty7App {
                 open: false,
                 sel: 0,
                 chosen,
-                prefill,
             });
             sw._subs.push(sub);
+            sw._subs.push(name_sub);
         }
         cx.notify();
     }
@@ -1322,7 +1320,6 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let prefill = default_workspace_name(chosen.as_ref(), cx);
         if let Some(sw) = self.switcher.as_mut()
             && let Page::Create(form) = &mut sw.page
         {
@@ -1330,29 +1327,17 @@ impl Tty7App {
             form.open = false;
             form.sel = 0;
             let (host, name) = (form.host.clone(), form.name.clone());
-            // A name the user has not touched follows the host; one they have
-            // is theirs and stays.
-            let untouched = {
-                let value = name.read(cx).value().trim().to_string();
-                value.is_empty() || value == form.prefill
-            };
-            if untouched {
-                form.prefill = prefill.clone();
-                name.update(cx, |state, cx| state.set_value(&prefill, window, cx));
-            }
             host.update(cx, |state, cx| state.set_value("", window, cx));
             name.update(cx, |state, cx| state.focus(window, cx));
-            if untouched {
-                crate::ui::prefill::select_all_when_drawn(&name, window, cx);
-            }
         }
         cx.notify();
     }
 
-    /// Enter on the form. Local and already-connected machines create on the
-    /// spot; a machine with no live link has to connect first — the create is
-    /// parked on the app and `finish_connect` completes it, because only a
-    /// live link knows the home directory a fresh workspace is rooted at.
+    /// Enter or Create on the form. Nothing happens until the name box says
+    /// something. Local and already-connected machines create on the spot; a
+    /// machine with no live link has to connect first — the create is parked
+    /// on the app and `finish_connect` completes it, because only a live link
+    /// knows the home directory a fresh workspace is rooted at.
     fn switcher_form_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (name, chosen) = {
             let Some(sw) = self.switcher.as_ref() else {
@@ -1361,8 +1346,10 @@ impl Tty7App {
             let Page::Create(form) = &sw.page else {
                 return;
             };
-            let name = form.name.read(cx).value().trim().to_string();
-            ((!name.is_empty()).then_some(name), form.chosen.clone())
+            let Some(name) = form.name(cx) else {
+                return;
+            };
+            (Some(name), form.chosen.clone())
         };
         match chosen {
             None => {
@@ -2889,18 +2876,39 @@ impl Tty7App {
             )
             .child(host_block);
 
-        let footer = h_flex()
-            .items_center()
-            .h(px(crate::ui::dialog::FOOTER_H))
-            .px(px(crate::ui::dialog::INSET))
-            .border_t_1()
-            .border_color(border)
-            .text_size(gpui::rems(11. / 16.))
-            .text_color(muted)
-            .child(match form.open {
-                true => t(L10nKey::SwitcherFormPickHint),
-                false => t(L10nKey::SwitcherFormCreateHint),
-            });
+        // The same button row as the other cards. While the dropdown is open
+        // Enter picks a host rather than creating, so the row says so.
+        let footer = crate::ui::dialog::footer(cx)
+            .when(form.open, |row| {
+                row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .pl(px(crate::ui::dialog::INSET - 6.))
+                        .text_size(gpui::rems(11. / 16.))
+                        .text_color(muted)
+                        .child(t(L10nKey::SwitcherFormPickHint)),
+                )
+            })
+            .child(crate::ui::dialog::button(
+                "switcher-form-cancel",
+                t(L10nKey::Cancel),
+                crate::ui::dialog::Tone::Secondary,
+                true,
+                sf,
+                cx,
+                cx.listener(|this, _, window, cx| this.switcher_back_to_list(window, cx)),
+            ))
+            .child(crate::ui::dialog::button(
+                "switcher-form-create",
+                t(L10nKey::SwitcherFormCreate),
+                crate::ui::dialog::Tone::Primary,
+                form.name(cx).is_some(),
+                sf,
+                cx,
+                cx.listener(|this, _, window, cx| this.switcher_form_create(window, cx)),
+            ));
 
         v_flex()
             .w(px(card_w))
@@ -4219,14 +4227,31 @@ mod gpui_tests {
             let super::Page::Create(form) = &sw.page else {
                 panic!("the card shows the create form");
             };
-            assert!(
-                form.chosen.is_none(),
-                "the host defaults to this computer, so Enter alone creates locally"
-            );
+            assert!(form.chosen.is_none(), "the host defaults to this computer");
             assert!(!form.open, "the dropdown starts folded");
             assert!(
-                !form.name.read(cx).value().trim().is_empty(),
-                "the name box starts prefilled with the generated default"
+                form.name(cx).is_none(),
+                "the name box starts empty; nothing is suggested for the user"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_create_form_will_not_create_without_a_name(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let before = app.update(cx, |app, _| app.workspace);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_workspace_form(window, cx);
+            app.switcher_form_create(window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert_eq!(app.workspace, before, "no workspace was created");
+            let sw = app.switcher.as_ref().expect("the form stays up");
+            assert!(
+                matches!(sw.page, super::Page::Create(_)),
+                "the card is still the create form, waiting for a name"
             );
         });
     }
