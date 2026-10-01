@@ -1,5 +1,6 @@
 mod boxdraw;
 mod cmd_editor;
+mod color_scheme;
 mod command_cursor;
 mod completion;
 pub mod element;

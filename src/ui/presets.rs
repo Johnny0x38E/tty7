@@ -674,7 +674,7 @@ pub(crate) fn legible_dim(ink: u32, bg: u32, opacity: f32) -> Option<u32> {
     Some(bisect_contrast(faded, ink, bg, floor))
 }
 
-fn is_dark(bg: u32) -> bool {
+pub(crate) fn is_dark(bg: u32) -> bool {
     relative_luminance(bg) < 0.5
 }
 

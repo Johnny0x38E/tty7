@@ -1747,6 +1747,8 @@ impl TerminalView {
         })
         .detach();
 
+        super::color_scheme::watch(cx);
+
         let displayed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let entity_id = cx.entity().entity_id();
         cx.default_global::<DisplayedRegistry>()
@@ -12268,6 +12270,208 @@ mod gpui_tests {
                 Err(e) => panic!("client socket failed before Input: {e}"),
             }
         }
+    }
+
+    /// `next_input_until_timeout` with the executor run between reads: a reply
+    /// crosses the reader thread and the view before it is written.
+    fn pumped_input(cx: &mut TestAppContext, daemon: &mut Stream, tries: usize) -> Option<String> {
+        (0..tries)
+            .find_map(|_| {
+                cx.run_until_parked();
+                next_input_until_timeout(daemon)
+            })
+            .map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    #[gpui::test]
+    fn a_theme_change_reaches_only_the_panes_that_asked(cx: &mut TestAppContext) {
+        let set_background = |cx: &mut TestAppContext, bg: gpui::Hsla| {
+            cx.update(|cx| gpui_component::Theme::global_mut(cx).background = bg)
+        };
+        let (_asked_window, mut asked) = harness(cx);
+        let (_plain_window, mut plain) = harness(cx);
+        set_background(cx, gpui::white());
+
+        DaemonMsg::Output(b"\x1b[?2031h\x1b[?996n".to_vec())
+            .encode(&mut asked)
+            .unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut asked, 20).as_deref(),
+            Some("\x1b[?997;2n"),
+            "996 answers the current scheme"
+        );
+
+        set_background(cx, gpui::black());
+        assert_eq!(
+            pumped_input(cx, &mut asked, 20).as_deref(),
+            Some("\x1b[?997;1n")
+        );
+        DaemonMsg::Output(b"\x1b]11;?\x07".to_vec())
+            .encode(&mut asked)
+            .unwrap();
+        assert!(
+            pumped_input(cx, &mut asked, 20)
+                .is_some_and(|reply| reply.contains("11;rgb:0000/0000/0000")),
+            "OSC 11 answers with the background the flip left"
+        );
+
+        set_background(cx, gpui::white());
+        assert_eq!(
+            pumped_input(cx, &mut asked, 20).as_deref(),
+            Some("\x1b[?997;2n")
+        );
+        assert_eq!(
+            pumped_input(cx, &mut plain, 2),
+            None,
+            "a pane that never set 2031 is not written to"
+        );
+
+        DaemonMsg::Output(b"\x1b[?2031l".to_vec())
+            .encode(&mut asked)
+            .unwrap();
+        assert_eq!(pumped_input(cx, &mut asked, 1), None);
+        set_background(cx, gpui::black());
+        assert_eq!(pumped_input(cx, &mut asked, 2), None, "2031 switched off");
+    }
+
+    #[gpui::test]
+    fn a_reattach_that_replays_2031_reports_the_scheme_once(cx: &mut TestAppContext) {
+        let (_window, mut daemon) = harness(cx);
+        cx.update(|cx| gpui_component::Theme::global_mut(cx).background = gpui::black());
+        // What a replay sends: the modes ahead of the ring, then each ring
+        // segment behind its size, then the shell's state. Nothing live
+        // follows: an idle pane still hears once.
+        let size = crate::daemon::protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 16,
+        };
+        let mut replay = Vec::new();
+        for frame in [
+            DaemonMsg::Snapshot(b"\x1b[?2031h".to_vec()),
+            DaemonMsg::Size(size),
+            DaemonMsg::Snapshot(b"\x1b[?996n".to_vec()),
+            DaemonMsg::Snapshot(b"$ ".to_vec()),
+            DaemonMsg::Prompt {
+                active: true,
+                at_prompt: false,
+                last_exit: None,
+            },
+        ] {
+            frame.encode(&mut replay).unwrap();
+        }
+        std::io::Write::write_all(&mut daemon, &replay).unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut daemon, 20).as_deref(),
+            Some("\x1b[?997;1n"),
+            "the theme may have flipped while detached"
+        );
+        assert_eq!(
+            pumped_input(cx, &mut daemon, 2),
+            None,
+            "one report for the whole replay, and the replayed 996 is not answered"
+        );
+    }
+
+    /// A program that switched 2031 on and died without `?2031l` leaves a
+    /// replay whose last word is still `?2031h`. The shell that owns the pane
+    /// now never asked, so neither a reattach nor a theme flip may type a
+    /// report into its command line.
+    #[gpui::test]
+    fn a_dead_programs_2031_never_reaches_the_shell(cx: &mut TestAppContext) {
+        let set_background = |cx: &mut TestAppContext, bg: gpui::Hsla| {
+            cx.update(|cx| gpui_component::Theme::global_mut(cx).background = bg)
+        };
+        let dead = b"\x1b]133;C;claude\x07\x1b[?2031hclaude output\r\n";
+        let prompt = b"\x1b]133;D;137\x07\x1b]133;A\x07$ \x1b]133;B\x07";
+        let restored = crate::daemon::pane::restore_preamble(Some("this shell is new"));
+
+        for tail in [&prompt[..], &restored[..]] {
+            let (_window, mut daemon) = harness(cx);
+            set_background(cx, gpui::white());
+            let mut replay = Vec::new();
+            for frame in [
+                DaemonMsg::Snapshot(dead.to_vec()),
+                DaemonMsg::Snapshot(tail.to_vec()),
+            ] {
+                frame.encode(&mut replay).unwrap();
+            }
+            std::io::Write::write_all(&mut daemon, &replay).unwrap();
+            assert_eq!(
+                pumped_input(cx, &mut daemon, 2),
+                None,
+                "a reattach reports nothing"
+            );
+            set_background(cx, gpui::black());
+            assert_eq!(pumped_input(cx, &mut daemon, 2), None, "nor does a flip");
+        }
+
+        // A ring takes many reads. One that ends after the segment holding
+        // `?2031h` and before the one holding the prompt is not the end of
+        // the replay.
+        let (_window, mut daemon) = harness(cx);
+        set_background(cx, gpui::white());
+        let size = crate::daemon::protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 16,
+        };
+        let mut head = Vec::new();
+        DaemonMsg::Size(size).encode(&mut head).unwrap();
+        DaemonMsg::Snapshot(dead.to_vec())
+            .encode(&mut head)
+            .unwrap();
+        std::io::Write::write_all(&mut daemon, &head).unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut daemon, 2),
+            None,
+            "half a replay reports nothing"
+        );
+        let mut rest = Vec::new();
+        DaemonMsg::Size(size).encode(&mut rest).unwrap();
+        DaemonMsg::Snapshot(prompt.to_vec())
+            .encode(&mut rest)
+            .unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: Some(137),
+        }
+        .encode(&mut rest)
+        .unwrap();
+        std::io::Write::write_all(&mut daemon, &rest).unwrap();
+        assert_eq!(pumped_input(cx, &mut daemon, 2), None, "nor does the rest");
+
+        // Live, the same: the program's exit and the next prompt end it.
+        let (_window, mut live) = harness(cx);
+        set_background(cx, gpui::white());
+        DaemonMsg::Output(dead.to_vec()).encode(&mut live).unwrap();
+        assert_eq!(pumped_input(cx, &mut live, 1), None);
+        set_background(cx, gpui::black());
+        assert_eq!(
+            pumped_input(cx, &mut live, 20).as_deref(),
+            Some("\x1b[?997;1n")
+        );
+        DaemonMsg::Output(prompt.to_vec())
+            .encode(&mut live)
+            .unwrap();
+        assert_eq!(pumped_input(cx, &mut live, 1), None);
+        set_background(cx, gpui::white());
+        assert_eq!(
+            pumped_input(cx, &mut live, 2),
+            None,
+            "a shell at its prompt hears nothing"
+        );
+        DaemonMsg::Output(b"\x1b[?996n".to_vec())
+            .encode(&mut live)
+            .unwrap();
+        assert_eq!(
+            pumped_input(cx, &mut live, 20).as_deref(),
+            Some("\x1b[?997;2n"),
+            "a live 996 is still answered"
+        );
     }
 
     #[gpui::test]

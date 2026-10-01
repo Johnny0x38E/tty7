@@ -30,6 +30,7 @@ use crate::daemon::protocol::{
 };
 use crate::daemon::transport::{self, Stream};
 use gpui::EntityId;
+use tty7_core::core::term_modes::{COLOR_SCHEME_UPDATES, TerminalModes};
 
 use super::size::TermSize;
 
@@ -114,6 +115,8 @@ struct ReaderSignals {
     /// its [`PtySource`], and shared rather than copied because the reader can
     /// learn better mid-stream — see the `RemoteContext` arm.
     local_conpty: Arc<AtomicBool>,
+    /// Whether the program in the pane switched on DEC mode 2031.
+    color_scheme_updates: Arc<AtomicBool>,
 }
 
 /// What kind of pty is at the far end of a pane's link, which is what decides
@@ -644,6 +647,8 @@ pub struct RemoteTerminal {
     /// to it is rebuilt, and the route a relink carries cannot tell a
     /// native-SSH pane from a local shell.
     local_conpty: Arc<AtomicBool>,
+    /// Whether the program in the pane switched on DEC mode 2031.
+    color_scheme_updates: Arc<AtomicBool>,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -973,6 +978,7 @@ impl RemoteTerminal {
                 // it was before the link dropped, and only this value still
                 // remembers what a `RemoteContext` taught the old reader.
                 local_conpty: self.local_conpty.clone(),
+                color_scheme_updates: self.color_scheme_updates.clone(),
             },
         );
         self.reader_thread = Some(reader);
@@ -1074,6 +1080,7 @@ impl RemoteTerminal {
 
         let reader_quit = Arc::new(AtomicBool::new(false));
         let local_conpty = Arc::new(AtomicBool::new(pty == PtySource::LocalConpty));
+        let color_scheme_updates = Arc::new(AtomicBool::new(false));
         let reader_thread = Self::spawn_reader(
             term.clone(),
             proxy.clone(),
@@ -1099,6 +1106,7 @@ impl RemoteTerminal {
                 clipboard_write_busy: clipboard_write_busy.clone(),
                 lease: lease.clone(),
                 local_conpty: local_conpty.clone(),
+                color_scheme_updates: color_scheme_updates.clone(),
             },
         );
 
@@ -1142,6 +1150,7 @@ impl RemoteTerminal {
             reader_thread: Some(reader_thread),
             reader_quit,
             local_conpty,
+            color_scheme_updates,
         })
     }
 
@@ -1214,6 +1223,7 @@ impl RemoteTerminal {
                     clipboard_write_busy,
                     lease,
                     local_conpty,
+                    color_scheme_updates,
                 } = signals;
                 let mut awaiting_replay = awaiting_replay;
                 crate::core::threads::promote_to_user_interactive();
@@ -1241,6 +1251,13 @@ impl RemoteTerminal {
                 let mut command_tok = OscTokenizer::new(&[b"133"]);
                 let mut command_cursor = CommandCursorStyle::default();
                 let mut prompt_break = PromptBreak::default();
+                // A new link replays the pane from scratch, 2031 included
+                // (`term_modes` restores it ahead of the ring).
+                let mut modes = TerminalModes::new();
+                color_scheme_updates.store(false, Ordering::Relaxed);
+                // Set by a replay, sent by the first frame after it: a replay
+                // is a modes Snapshot plus one per ring segment.
+                let mut report_scheme = false;
                 let mut pending: Vec<u8> = buffered;
                 // Kitty-graphics decode runs on its own thread with newest-frame
                 // coalescing (issue #213): inflating a full-window browser frame
@@ -1436,6 +1453,21 @@ impl RemoteTerminal {
                                 break 'main;
                             }
                         };
+                        // Once per replay (a modes Snapshot, then one per
+                        // ring segment), at the first frame past the ring —
+                        // not when what was read runs out: an 8 MiB ring
+                        // takes many reads, and a read that ends between the
+                        // segment holding a dead program's `?2031h` and the
+                        // one holding the prompt that ended it would report
+                        // into the shell. A live Output reports once folded.
+                        if !matches!(
+                            msg,
+                            DaemonMsg::Size(_) | DaemonMsg::Snapshot(_) | DaemonMsg::Output(_)
+                        ) && std::mem::take(&mut report_scheme)
+                            && modes.is_on(COLOR_SCHEME_UPDATES)
+                        {
+                            proxy.send_event(super::color_scheme::query_reply());
+                        }
                         match msg {
                             // Geometry, applied at this exact stream position.
                             // During replay each ring segment is preceded by
@@ -1506,6 +1538,12 @@ impl RemoteTerminal {
                                     }
                                 });
                                 proxy.replaying.store(false, Ordering::Relaxed);
+                                // A replayed `?996n` was answered long ago,
+                                // but the theme may have flipped while the pane
+                                // was detached, so say what it is now.
+                                super::color_scheme::fold(&mut modes, &bytes, &color_scheme_updates);
+                                modes.take_color_scheme_queries();
+                                report_scheme = true;
                                 // The replay carries the pane's recent marks,
                                 // so reading it is what lets a reattached
                                 // window know whether the title it just
@@ -1527,6 +1565,15 @@ impl RemoteTerminal {
                                 // time, and that report would be discounted.
                                 awaiting_replay = false;
                                 replaying_state = false;
+                                super::color_scheme::fold(&mut modes, &bytes, &color_scheme_updates);
+                                if std::mem::take(&mut report_scheme)
+                                    && modes.is_on(COLOR_SCHEME_UPDATES)
+                                {
+                                    proxy.send_event(super::color_scheme::query_reply());
+                                }
+                                for _ in 0..modes.take_color_scheme_queries() {
+                                    proxy.send_event(super::color_scheme::query_reply());
+                                }
                                 out_batch.extend_from_slice(&bytes);
                                 tr_frames += 1;
                             }
@@ -1826,6 +1873,10 @@ impl RemoteTerminal {
 
     pub(super) fn is_local_conpty(&self) -> bool {
         self.local_conpty.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn color_scheme_updates(&self) -> bool {
+        self.color_scheme_updates.load(Ordering::Relaxed)
     }
 
     /// Queues a keystroke — or a paste, or a mouse report — for the link.
