@@ -1188,7 +1188,11 @@ fn load_iterm_theme(path: &std::path::Path) -> Result<Theme, String> {
     let color = |key: &str| -> Option<u32> {
         let c = dict.get(key)?.as_dictionary()?;
         let comp = |k: &str| -> Option<u32> {
-            let f = c.get(k)?.as_real()?;
+            // iTerm2 and plistlib write exact 0 and 1 as `<integer>`.
+            let v = c.get(k)?;
+            let f = v
+                .as_real()
+                .or_else(|| v.as_signed_integer().map(|i| i as f64))?;
             Some((f.clamp(0.0, 1.0) * 255.0).round() as u32)
         };
         Some(
@@ -2582,6 +2586,35 @@ ansi:
         let img = file.background_image.expect("image field lost");
         assert_eq!(img.path, "/pictures/koi.jpg");
         assert_eq!(img.opacity, 0.4);
+    }
+
+    #[test]
+    fn iterm_theme_accepts_integer_components_and_no_alpha() {
+        let entry = |key: String, r: &str| {
+            format!(
+                "<key>{key}</key><dict><key>Red Component</key>{r}\
+                 <key>Green Component</key><real>0.5</real>\
+                 <key>Blue Component</key><integer>0</integer></dict>"
+            )
+        };
+        let mut body: String = (0..16)
+            .map(|i| entry(format!("Ansi {i} Color"), "<integer>1</integer>"))
+            .collect();
+        body += &entry("Background Color".into(), "<integer>0</integer>");
+        body += &entry("Foreground Color".into(), "<real>1.0</real>");
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <plist version=\"1.0\"><dict>{body}</dict></plist>"
+        );
+        let path =
+            std::env::temp_dir().join(format!("tty7-int-{}.itermcolors", std::process::id()));
+        std::fs::write(&path, xml).unwrap();
+        let theme = load_iterm_theme(&path);
+        let _ = std::fs::remove_file(&path);
+        let theme = theme.unwrap();
+        assert_eq!(theme.ansi16[2], (0xff, 0x80, 0x00));
+        assert_eq!(theme.background_color(), 0x008000);
+        assert_eq!(theme.foreground, 0xff8000);
     }
 
     #[test]
