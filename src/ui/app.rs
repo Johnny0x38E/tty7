@@ -6772,6 +6772,11 @@ impl Tty7App {
                     leaf.update(cx, |view, cx| view.open_search(window, cx));
                 }
             }
+            ToggleComposer => {
+                if let Some(leaf) = self.focused_leaf(window, cx) {
+                    leaf.update(cx, |view, cx| view.toggle_composer(window, cx));
+                }
+            }
             FindNext => {
                 if let Some(leaf) = self.focused_leaf(window, cx) {
                     leaf.update(cx, |view, cx| view.find_step(true, cx));
@@ -9673,7 +9678,7 @@ impl Render for Tty7App {
                                         .right_0()
                                         .w(px(panel_px))
                                         .bg(crate::ui::theme::workspace_surface_color(cx))
-                                        .border_l_1()
+                                        .border_l(crate::ui::theme::hairline(window))
                                         .border_color(cx.theme().sidebar_border),
                                 )
                             })
@@ -9686,7 +9691,7 @@ impl Render for Tty7App {
                                         .right(px(panel_px))
                                         .w(px(document_px))
                                         .bg(crate::ui::theme::workspace_surface_color(cx))
-                                        .border_l_1()
+                                        .border_l(crate::ui::theme::hairline(window))
                                         .border_color(cx.theme().sidebar_border),
                                 )
                             })

@@ -1031,6 +1031,43 @@ pub struct AgentSessionState {
     /// the turn back on [`AgentStatus::Working`].
     #[serde(default)]
     pub inferred: bool,
+    /// The agent's settings as its hooks last described them. Only Claude
+    /// Code's hooks carry these today.
+    #[serde(default)]
+    pub readout: AgentReadout,
+}
+
+/// What an agent says about how it is set up — what the message composer's
+/// toolbar shows. Each field is only ever what the agent reported; a field
+/// it has not reported stays `None` rather than being guessed at.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReadout {
+    /// The agent's own word for it: `default`, `acceptEdits`, `plan`,
+    /// `bypassPermissions`, …
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// The model id, as the agent's transcript records it.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The reasoning effort level (`low`, `medium`, `high`, …); empty when
+    /// the agent runs a model that takes none.
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+impl AgentReadout {
+    /// Take what `newer` reports and keep the rest: one event rarely carries
+    /// every field, and a missing one says nothing about its value.
+    pub fn merge(&mut self, newer: &AgentReadout) {
+        fn take<T: Clone>(slot: &mut Option<T>, newer: &Option<T>) {
+            if newer.is_some() {
+                slot.clone_from(newer);
+            }
+        }
+        take(&mut self.permission_mode, &newer.permission_mode);
+        take(&mut self.model, &newer.model);
+        take(&mut self.effort, &newer.effort);
+    }
 }
 
 impl AgentStatus {
@@ -1085,6 +1122,14 @@ impl AgentSessionState {
     }
 
     pub fn apply_event(&mut self, ev: &AgentEvent) {
+        // A status set before the first hook came from a desktop notification
+        // — Crush's "turn completed", say — which says the pane wants a look,
+        // not that a question is open. Taken for one, the first tool report
+        // turned it into a turn running, and nothing would ever end it.
+        if !self.rich && self.status == AgentStatus::Waiting {
+            self.status = AgentStatus::Idle;
+            self.message = None;
+        }
         self.rich = true;
         let guessed = std::mem::take(&mut self.inferred);
         if let Some(id) = &ev.session_id {
@@ -1093,6 +1138,7 @@ impl AgentSessionState {
         if let Some(cwd) = &ev.cwd {
             self.cwd = Some(cwd.clone());
         }
+        self.readout.merge(&ev.readout);
         match ev.kind {
             AgentEventKind::SessionStart => {
                 self.status = AgentStatus::Idle;
@@ -1155,20 +1201,21 @@ pub struct AgentEvent {
     pub session_id: Option<String>,
     pub message: Option<String>,
     pub cwd: Option<std::path::PathBuf>,
-    /// What the user typed, on a `PromptSubmit` — already clamped to a label's
-    /// worth of text by the hook that sent it, since this rides an OSC payload
-    /// the tokenizer abandons rather than truncates past 8 KiB.
-    ///
-    /// Separate from `message`, which carries what the *agent* said and is
-    /// deliberately cleared when a turn starts.
-    pub prompt: Option<String>,
+    /// What started the session, on a session start that says: `startup`,
+    /// `resume`, `clear` (Codex's `/new`), `compact`.
+    pub source: Option<String>,
+    pub readout: AgentReadout,
 }
 
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
     let rest = payload.strip_prefix(b"777;notify;")?;
     let rest = rest.strip_prefix(AGENT_EVENT_SENTINEL.as_bytes())?;
-    let json = rest.strip_prefix(b";")?;
+    parse_agent_event_body(rest.strip_prefix(b";")?)
+}
 
+/// The JSON body of an agent event, without the OSC around it — what a hook
+/// hands the daemon over its socket.
+pub fn parse_agent_event_body(json: &[u8]) -> Option<AgentEvent> {
     #[derive(Deserialize)]
     struct Wire {
         #[serde(default)]
@@ -1184,7 +1231,9 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         #[serde(default)]
         cwd: Option<String>,
         #[serde(default)]
-        prompt: Option<String>,
+        source: Option<String>,
+        #[serde(flatten)]
+        readout: AgentReadout,
     }
 
     let w: Wire = serde_json::from_slice(json).ok()?;
@@ -1196,13 +1245,41 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         session_id: nonempty(w.session_id),
         message: nonempty(w.message),
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
-        prompt: nonempty(w.prompt),
+        source: nonempty(w.source),
+        readout: w.readout,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A later event that leaves a field out keeps what an earlier one said.
+    #[test]
+    fn the_readout_keeps_what_later_events_leave_out() {
+        let mut state = AgentSessionState::default();
+        let event = |readout: AgentReadout| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind: AgentEventKind::ToolComplete,
+            session_id: None,
+            message: None,
+            cwd: None,
+            source: None,
+            readout,
+        };
+        state.apply_event(&event(AgentReadout {
+            permission_mode: Some("plan".into()),
+            model: Some("claude-opus-5-5".into()),
+            ..Default::default()
+        }));
+        state.apply_event(&event(AgentReadout {
+            effort: Some("high".into()),
+            ..Default::default()
+        }));
+        assert_eq!(state.readout.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(state.readout.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(state.readout.effort.as_deref(), Some("high"));
+    }
 
     #[test]
     fn claude_starts_fresh_under_the_same_id_with_its_flags() {
@@ -1699,7 +1776,8 @@ mod tests {
             session_id: id.map(String::from),
             message: msg.map(String::from),
             cwd: None,
-            prompt: None,
+            source: None,
+            readout: Default::default(),
         };
 
         s.apply_event(&ev(AgentEventKind::SessionStart, None, Some("sid-1")));
@@ -1747,6 +1825,30 @@ mod tests {
         assert_eq!(s.session_id.as_deref(), Some("sid-1"));
     }
 
+    /// A desktop notification before any hook marks the pane waiting; the
+    /// first hook report must not read that as a question being answered.
+    #[test]
+    fn a_hook_after_a_notification_does_not_start_a_turn() {
+        let mut s = AgentSessionState {
+            status: AgentStatus::Waiting,
+            message: Some("Agent's turn completed".into()),
+            ..Default::default()
+        };
+        s.apply_event(&AgentEvent {
+            agent: Some(CLIAgent::Crush),
+            kind: AgentEventKind::ToolComplete,
+            session_id: Some("sid".into()),
+            message: None,
+            cwd: None,
+            source: None,
+            readout: Default::default(),
+        });
+        assert_eq!(s.status, AgentStatus::Idle);
+        assert_eq!(s.message, None);
+        assert!(s.rich);
+        assert_eq!(s.activity, 1);
+    }
+
     #[test]
     fn tool_completions_count_even_when_the_status_holds_still() {
         let ev = |kind| AgentEvent {
@@ -1755,7 +1857,8 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
-            prompt: None,
+            source: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1789,7 +1892,8 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
-            prompt: None,
+            source: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1841,7 +1945,8 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
-            prompt: None,
+            source: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1878,7 +1983,8 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
-            prompt: None,
+            source: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1910,7 +2016,8 @@ mod tests {
             session_id: None,
             message: None,
             cwd: cwd.map(PathBuf::from),
-            prompt: None,
+            source: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();

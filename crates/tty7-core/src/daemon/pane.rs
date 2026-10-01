@@ -387,7 +387,7 @@ const TERM_PROGRAM_NAME: &str = "tty7";
 /// Publishing the directory instead means a CLI in this shell resolves both
 /// endpoints with the very same functions the server used to open them.
 const TTY7_CONFIG_DIR_ENV: &str = "TTY7_CONFIG_DIR";
-const TTY7_PANE_ENV: &str = "TTY7_PANE";
+pub(crate) const TTY7_PANE_ENV: &str = "TTY7_PANE";
 const TTY7_WS_ENV: &str = "TTY7_WS";
 
 fn config_dir_env() -> Option<String> {
@@ -790,26 +790,44 @@ pub(crate) const AGENT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 /// kitty keyboard protocol and xterm `modifyOtherKeys` forms a TUI may have
 /// switched the terminal into. Only a whole write counts — the key arrives on
 /// its own, and a paste that happens to hold `0x03` is not a keypress.
+#[cfg(test)]
 fn is_interrupt_key(bytes: &[u8]) -> bool {
+    interrupt_key(bytes).is_some()
+}
+
+/// Which interrupt key one input write is — see [`is_interrupt_key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptKey {
+    Escape,
+    CtrlC,
+}
+
+/// Whether `bytes` stops `agent`'s turn. Grok Build takes only Ctrl+C for
+/// that: its Esc leaves a running turn running, and counting it would call
+/// the turn over while it still works.
+fn interrupts(agent: Option<crate::core::cli_agent::CLIAgent>, bytes: &[u8]) -> bool {
+    match interrupt_key(bytes) {
+        Some(InterruptKey::Escape) => agent != Some(crate::core::cli_agent::CLIAgent::Grok),
+        Some(InterruptKey::CtrlC) => true,
+        None => false,
+    }
+}
+
+fn interrupt_key(bytes: &[u8]) -> Option<InterruptKey> {
     match bytes {
-        b"\x1b" | b"\x03" | b"\x1b[27;5;99~" => return true,
+        b"\x1b" => return Some(InterruptKey::Escape),
+        b"\x03" | b"\x1b[27;5;99~" => return Some(InterruptKey::CtrlC),
         _ => {}
     }
-    let Some(body) = bytes
+    let body = bytes
         .strip_prefix(b"\x1b[")
         .and_then(|b| b.strip_suffix(b"u"))
-        .and_then(|b| std::str::from_utf8(b).ok())
-    else {
-        return false;
-    };
+        .and_then(|b| std::str::from_utf8(b).ok())?;
     let mut fields = body.split(';');
-    let Some(code) = fields
+    let code = fields
         .next()
         .and_then(|f| f.split(':').next())
-        .and_then(|c| c.parse::<u32>().ok())
-    else {
-        return false;
-    };
+        .and_then(|c| c.parse::<u32>().ok())?;
     let mut modifiers = fields.next().unwrap_or("1").split(':');
     let mods = modifiers
         .next()
@@ -817,12 +835,16 @@ fn is_interrupt_key(bytes: &[u8]) -> bool {
         .unwrap_or(1);
     let event = modifiers.next().map_or(Some(1), |e| e.parse::<u32>().ok());
     if event != Some(1) {
-        return false;
+        return None;
     }
     // Caps Lock and Num Lock ride along in the mask without changing the key.
     const LOCKS: u32 = 64 | 128;
     let mods = mods.saturating_sub(1) & !LOCKS;
-    (code == 27 && mods == 0) || (code == 99 && mods == 4)
+    match (code, mods) {
+        (27, 0) => Some(InterruptKey::Escape),
+        (99, 4) => Some(InterruptKey::CtrlC),
+        _ => None,
+    }
 }
 
 fn notify(st: &mut PaneState, msg: DaemonMsg) {
@@ -2371,21 +2393,7 @@ impl DaemonPane {
                                 && let (Some(before), Some(after)) = (facts_before, facts_after)
                                 && facts_changed(&before, &after)
                             {
-                                crate::core::machine::observe_pane(pane, |p| {
-                                    if after.cwd.is_some() {
-                                        p.cwd = after.cwd;
-                                    }
-                                    // Unlike the others this one is also cleared
-                                    // by a reset, so it is assigned either way.
-                                    p.osc_title = after.osc_title;
-                                    p.agent = after.agent;
-                                    if after.shell.is_some() {
-                                        p.shell = after.shell;
-                                    }
-                                    if alive {
-                                        p.live = true;
-                                    }
-                                });
+                                publish_facts(pane, alive, after);
                             }
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -2513,6 +2521,59 @@ impl DaemonPane {
         expire_stale_agent(&mut self.state.lock().unwrap(), std::time::Instant::now());
     }
 
+    /// Apply an agent hook's report that came over the socket rather than
+    /// through the pane's output (`ClientMsg::AgentEvent`), exactly as if the
+    /// reader had found it there — once `pid`, the hook, is shown to run
+    /// under this pane's shell. The pane id the hook named came from its
+    /// environment, and a detached `tmux` server or the like carries that
+    /// into processes this pane does not own.
+    pub fn report_agent_event(&self, pid: u32, body: &str) -> Result<(), String> {
+        let shell = self
+            .pty()
+            .and_then(|pty| pty.shell_pid)
+            .ok_or_else(|| format!("pane {} runs no local process", self.id))?;
+        let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes())
+            .ok_or_else(|| "not an agent event".to_string())?;
+        let running = self.state.lock().unwrap().agent;
+        if !crate::daemon::procinfo::descends_from(pid, shell)
+            && !owns_detached_report(event.agent, running)
+        {
+            return Err(format!("process {pid} does not run in pane {}", self.id));
+        }
+        self.apply_reported_agent_event(event)
+    }
+
+    /// Apply a hook's report this pane was found to own some other way than
+    /// by where the hook runs — see [`codex_report_target`].
+    pub fn apply_reported_agent_event(
+        &self,
+        event: crate::core::cli_agent::AgentEvent,
+    ) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !st.alive {
+            return Err(format!("pane {} is not running", self.id));
+        }
+        let before = observed_facts(&st);
+        apply_agent_signals(&mut st, vec![event], None);
+        let after = observed_facts(&st);
+        drop(st);
+        if !self.shutting_down.load(Ordering::SeqCst) && facts_changed(&before, &after) {
+            publish_facts(self.id, true, after);
+        }
+        Ok(())
+    }
+
+    /// This pane as a Codex report sees it, for [`codex_report_target`].
+    pub fn codex_candidate(&self) -> CodexCandidate {
+        let st = self.state.lock().unwrap();
+        CodexCandidate {
+            pane: self.id,
+            runs_codex: st.alive && st.agent == Some(crate::core::cli_agent::CLIAgent::Codex),
+            cwd: st.cwd.clone(),
+            session: st.agent_session.as_ref().and_then(|s| s.session_id.clone()),
+        }
+    }
+
     pub fn gate(&self) -> Arc<OutputGate> {
         self.gate.clone()
     }
@@ -2521,7 +2582,8 @@ impl DaemonPane {
         if bytes.is_empty() {
             return;
         }
-        if is_interrupt_key(bytes) {
+        let agent = self.state.lock().unwrap().agent;
+        if interrupts(agent, bytes) {
             arm_interrupt(&self.state);
         }
         if let Ok(mut writer) = self.writer.lock() {
@@ -3287,6 +3349,24 @@ fn observed_facts(st: &PaneState) -> ObservedFacts {
     }
 }
 
+fn publish_facts(pane: u64, alive: bool, after: ObservedFacts) {
+    crate::core::machine::observe_pane(pane, |p| {
+        if after.cwd.is_some() {
+            p.cwd = after.cwd;
+        }
+        // Unlike the others this one is also cleared by a reset, so it is
+        // assigned either way.
+        p.osc_title = after.osc_title;
+        p.agent = after.agent;
+        if after.shell.is_some() {
+            p.shell = after.shell;
+        }
+        if alive {
+            p.live = true;
+        }
+    });
+}
+
 fn facts_changed(before: &ObservedFacts, after: &ObservedFacts) -> bool {
     before.cwd != after.cwd
         || before.osc_title != after.osc_title
@@ -3491,6 +3571,84 @@ fn apply_probed_cwd(st: &mut PaneState, probed: Option<PathBuf>) {
     }
     notify(st, DaemonMsg::Cwd(probed.clone()));
     st.cwd = Some(probed);
+}
+
+/// Whether a report from a process outside the pane it names still belongs
+/// to it, because the agent it is about runs its hooks there by design.
+///
+/// Prime Agent's TUI hands each session to a background daemon — started by
+/// the first session, detached, and outliving it — which runs that session's
+/// extensions, tty7's bridge among them, with the environment of the TUI that
+/// asked for it. The report's `$TTY7_PANE` is therefore right while the
+/// process is never under the pane's shell. Taking it on the pane's word is
+/// safe as long as that pane is running Prime Agent itself.
+fn owns_detached_report(
+    reported: Option<crate::core::cli_agent::CLIAgent>,
+    running: Option<crate::core::cli_agent::CLIAgent>,
+) -> bool {
+    use crate::core::cli_agent::CLIAgent;
+    reported == Some(CLIAgent::PrimeAgent) && running == reported
+}
+
+/// A pane as a Codex hook report sees it: whether Codex runs in it, where,
+/// and which session it last reported.
+#[derive(Debug, Clone)]
+pub struct CodexCandidate {
+    pub pane: u64,
+    pub runs_codex: bool,
+    pub cwd: Option<PathBuf>,
+    pub session: Option<String>,
+}
+
+/// The pane a Codex hook's report belongs to.
+///
+/// Codex runs its hooks in its app-server: one background process that every
+/// Codex session on the machine talks to, started by whichever session came
+/// first and outliving it. A hook therefore carries that first session's
+/// environment — its `$TTY7_PANE` — and runs under that pane's shell only for
+/// as long as that session lasts, so neither says which pane the report is
+/// about. The report does: its session, then its directory. A pane that has
+/// already reported the session owns it; otherwise it is the one pane running
+/// Codex in that directory, or among every Codex pane when none runs there
+/// (`codex -C` leaves the shell elsewhere). Of several, a session `/new`
+/// started (`cleared`) goes to one that had a session before and any other to
+/// one yet to report, and the named pane breaks a tie that still stands.
+/// `None` is no pane, or no telling which.
+pub fn codex_report_target(
+    panes: &[CodexCandidate],
+    named: u64,
+    session: Option<&str>,
+    cwd: Option<&Path>,
+    cleared: bool,
+) -> Option<u64> {
+    let codex = || panes.iter().filter(|p| p.runs_codex);
+    if let Some(session) = session
+        && let Some(owner) = codex().find(|p| p.session.as_deref() == Some(session))
+    {
+        return Some(owner.pane);
+    }
+    let here: Vec<&CodexCandidate> = codex()
+        .filter(|p| {
+            cwd.zip(p.cwd.as_deref())
+                .is_some_and(|(cwd, c)| same_dir(c, cwd))
+        })
+        .collect();
+    let pool = if here.is_empty() {
+        codex().collect()
+    } else {
+        here
+    };
+    let likely: Vec<&CodexCandidate> = pool
+        .iter()
+        .copied()
+        .filter(|p| p.session.is_some() == cleared)
+        .collect();
+    let pool = if likely.is_empty() { pool } else { likely };
+    match pool.as_slice() {
+        [only] => Some(only.pane),
+        [] => None,
+        several => several.iter().find(|p| p.pane == named).map(|p| p.pane),
+    }
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -3951,6 +4109,23 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
 
+    /// Only Prime Agent's daemon reports from outside the pane, and only to a
+    /// pane running Prime Agent.
+    #[test]
+    fn a_detached_report_is_taken_only_from_prime_agent_in_its_own_pane() {
+        use super::owns_detached_report;
+        use crate::core::cli_agent::CLIAgent;
+        let prime = Some(CLIAgent::PrimeAgent);
+        assert!(owns_detached_report(prime, prime));
+        assert!(!owns_detached_report(prime, None));
+        assert!(!owns_detached_report(prime, Some(CLIAgent::Pi)));
+        assert!(!owns_detached_report(
+            Some(CLIAgent::Pi),
+            Some(CLIAgent::Pi)
+        ));
+        assert!(!owns_detached_report(None, prime));
+    }
+
     /// A pane inherits the directory the last one *reported* — the logical
     /// path, `/tmp/x` and not the `/private/tmp/x` the kernel resolves it to.
     /// `cwd()` alone loses that: the shell falls back to `getcwd()` and one
@@ -4052,6 +4227,132 @@ mod tests {
         let got = initial_working_directory(Some(file.clone()));
         assert_ne!(got.as_deref(), Some(file.as_path()));
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// A hook's report that arrives over the socket lands like one read off
+    /// the output — but only from a process that runs in the pane.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_codex_report_finds_its_pane_by_session_then_directory() {
+        let pane = |pane: u64, codex: bool, cwd: &str, session: Option<&str>| CodexCandidate {
+            pane,
+            runs_codex: codex,
+            cwd: Some(PathBuf::from(cwd)),
+            session: session.map(str::to_string),
+        };
+        let panes = [
+            pane(1, true, "/work/a", Some("s-a")),
+            pane(2, true, "/work/b", None),
+            pane(3, false, "/work/b", None),
+            pane(4, true, "/work/c", Some("s-c")),
+            pane(5, true, "/work/c", None),
+        ];
+        let target = |named: u64, session: Option<&str>, cwd: &str| {
+            codex_report_target(&panes, named, session, Some(Path::new(cwd)), false)
+        };
+
+        // The app-server was started in pane 1, so every hook names it.
+        assert_eq!(target(1, Some("s-a"), "/work/a"), Some(1));
+        assert_eq!(
+            target(1, Some("s-c"), "/work/elsewhere"),
+            Some(4),
+            "a reported session stays with its pane"
+        );
+        assert_eq!(
+            target(1, Some("s-new"), "/work/b"),
+            Some(2),
+            "a new session goes to the one Codex pane in its directory"
+        );
+        assert_eq!(
+            target(1, Some("s-new"), "/work/c"),
+            Some(5),
+            "of two there, the one yet to report a session"
+        );
+        assert_eq!(
+            target(1, Some("s-next"), "/work/a"),
+            Some(1),
+            "a new session in a pane that had one before (/new) is still that pane's"
+        );
+        assert_eq!(
+            codex_report_target(&panes, 1, Some("s-c2"), Some(Path::new("/work/c")), true),
+            Some(4),
+            "but a session /new started goes to the one that had a session"
+        );
+        assert_eq!(
+            target(1, Some("s-new"), "/work/none"),
+            None,
+            "a directory no pane runs Codex in leaves every fresh pane in the running"
+        );
+        let elsewhere = [
+            pane(1, true, "/work/a", Some("s-a")),
+            pane(2, true, "/home", None),
+        ];
+        assert_eq!(
+            codex_report_target(
+                &elsewhere,
+                1,
+                Some("s-b"),
+                Some(Path::new("/work/b")),
+                false
+            ),
+            Some(2),
+            "codex -C: the one Codex pane yet to report, not the app-server's"
+        );
+
+        let twins = [
+            pane(6, true, "/work/d", None),
+            pane(7, true, "/work/d", None),
+        ];
+        let twin = |named| {
+            codex_report_target(&twins, named, Some("s"), Some(Path::new("/work/d")), false)
+        };
+        assert_eq!(twin(7), Some(7), "a tie goes to the pane the hook named");
+        assert_eq!(twin(1), None, "and is no one's otherwise");
+    }
+
+    #[test]
+    fn a_hook_report_counts_only_from_inside_the_pane() {
+        let (tx, rx) = mpsc::channel();
+        let pane = DaemonPane::spawn(
+            1,
+            Some(PathBuf::from("/")),
+            ws(80, 24),
+            Some(ShellSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exec cat".into()],
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .expect("spawn pane");
+        pane.attach(tx);
+        let shell = pane.pty().and_then(|p| p.shell_pid).expect("shell pid");
+        let body = r#"{"v":1,"agent":"claude","event":"prompt-submit","session_id":"s-1"}"#;
+
+        let outsider = pane.report_agent_event(std::process::id(), body);
+        let garbled = pane.report_agent_event(shell, "{not json");
+        let applied = pane.report_agent_event(shell, body);
+        let mut status = None;
+        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            if let DaemonMsg::AgentStatus(s) = msg {
+                status = s;
+            }
+        }
+        pane.kill();
+
+        assert!(
+            outsider.is_err(),
+            "the test runner does not run in the pane"
+        );
+        assert!(garbled.is_err());
+        assert_eq!(applied, Ok(()));
+        let status = status.expect("the report reached the pane's subscribers");
+        assert_eq!(status.status, crate::core::cli_agent::AgentStatus::Working);
+        assert_eq!(status.session_id.as_deref(), Some("s-1"));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -5620,6 +5921,19 @@ mod tests {
         }
     }
 
+    /// Grok Build's Esc does not stop its turn; its Ctrl+C does.
+    #[test]
+    fn grok_builds_turn_is_stopped_by_ctrl_c_alone() {
+        use crate::core::cli_agent::CLIAgent;
+        let grok = Some(CLIAgent::Grok);
+        assert!(!interrupts(grok, b"\x1b"));
+        assert!(!interrupts(grok, b"\x1b[27;1:1u"));
+        assert!(interrupts(grok, b"\x03"));
+        assert!(interrupts(grok, b"\x1b[99;5u"));
+        assert!(interrupts(Some(CLIAgent::Pi), b"\x1b"));
+        assert!(interrupts(None, b"\x1b"));
+    }
+
     fn working_session() -> crate::core::cli_agent::AgentSessionState {
         crate::core::cli_agent::AgentSessionState {
             status: crate::core::cli_agent::AgentStatus::Working,
@@ -5728,7 +6042,8 @@ mod tests {
                 session_id: None,
                 message: None,
                 cwd: None,
-                prompt: None,
+                source: None,
+                readout: Default::default(),
             }],
             None,
         );
@@ -6056,6 +6371,7 @@ mod tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            readout: Default::default(),
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

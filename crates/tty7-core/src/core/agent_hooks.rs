@@ -24,7 +24,34 @@ pub fn run_agent_hook(agent: &str, event: &str) {
     let Some(event) = effective_event(agent, event, &input) else {
         return;
     };
-    write_to_controlling_tty(&build_hook_sequence(agent, event, &input));
+    let body = build_hook_body(agent, event, &input);
+    if report_to_daemon(&body) {
+        return;
+    }
+    write_to_controlling_tty(&hook_sequence(&body));
+}
+
+/// Hand the report to the daemon that owns this pane, over its socket.
+///
+/// The tty is the channel of last resort. The agent draws on it too, and a
+/// tty write is not atomic — on macOS the kernel parks a writer mid-write
+/// whenever the output queue is full, which is exactly when an agent is busy
+/// redrawing — so the agent's output can land inside the sequence, break it,
+/// and leave the rest of it on screen as text. The socket has no such
+/// neighbour. It only works where the daemon runs, though: a hook the
+/// environment points at no daemon, at a daemon that predates this message,
+/// or at a pane it does not run in (see `DaemonPane::report_agent_event`)
+/// falls back to the tty.
+fn report_to_daemon(body: &str) -> bool {
+    let Some(pane) = std::env::var(crate::daemon::pane::TTY7_PANE_ENV)
+        .ok()
+        .and_then(|p| p.trim().parse::<u64>().ok())
+    else {
+        return false;
+    };
+    crate::client::PaneClient::local()
+        .report_agent_event(pane, std::process::id(), body)
+        .is_ok()
 }
 
 #[cfg(not(unix))]
@@ -97,7 +124,19 @@ fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<
     Some(event)
 }
 
+#[cfg(test)]
 fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
+    hook_sequence(&build_hook_body(agent, event, stdin_json))
+}
+
+/// The report as it goes out on the tty: the body wrapped in the OSC 777
+/// notification the daemon's reader looks for.
+fn hook_sequence(body: &str) -> Vec<u8> {
+    format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+}
+
+/// The report itself, as JSON — see `cli_agent::parse_agent_event_body`.
+fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
     let payload: serde_json::Value =
         serde_json::from_str(stdin_json).unwrap_or(serde_json::json!({}));
     let mut body = serde_json::json!({
@@ -114,6 +153,8 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
         ("cwd", "cwd"),
         // Goose spells the working directory its own way.
         ("cwd", "working_dir"),
+        // What started a session — see `cli_agent::AgentEvent::source`.
+        ("source", "source"),
     ] {
         if let Some(v) = payload
             .get(key)
@@ -123,6 +164,11 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
         {
             body[key] = serde_json::Value::String(v.to_string());
         }
+    }
+    if let Some(message) = body.get_mut("message")
+        && let Some(text) = message.as_str()
+    {
+        *message = clip_chars(text, MESSAGE_MAX).into();
     }
     // Antigravity names the session after the conversation, in camelCase.
     // Scoped to it: the alias table is last-write-wins, and another agent's
@@ -150,39 +196,238 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     {
         body["cwd"] = serde_json::Value::String(root.to_string());
     }
-    if let Some(prompt) = ["prompt", "userPrompt", "user_prompt"]
-        .iter()
-        .find_map(|k| payload.get(*k))
-        .and_then(|v| v.as_str())
-        .and_then(prompt_label)
-    {
-        body["prompt"] = serde_json::Value::String(prompt);
+    if agent == "claude" {
+        claude_readout(event, &payload, &mut body);
     }
-    format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+    body.to_string()
 }
 
-/// How much of a prompt rides back to the terminal.
-///
-/// Two reasons it is short. The payload goes out as an OSC, and the tokenizer
-/// reading it *abandons* anything past 8 KiB rather than truncating — a pasted
-/// file would silently cost the whole event, not just its tail. And what the
-/// client does with this is label one row of a list and look for that text in
-/// the scrollback, neither of which can use more than a line.
-const PROMPT_LABEL_MAX: usize = 200;
+/// How much of the end of a transcript is read for the latest reply. One
+/// assistant entry is a few KiB; this is room for a long tool result after it.
+const TRANSCRIPT_TAIL: u64 = 512 * 1024;
 
-/// The first line of what the user typed, which is both the label an outline
-/// row shows and the needle that finds the turn again in the scrollback.
+/// How long `Stop` waits for its turn's reply to reach the transcript, and
+/// how often it looks meanwhile.
+const TRANSCRIPT_CATCH_UP: std::time::Duration = std::time::Duration::from_millis(600);
+const TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// What Claude Code says about its settings, for the composer's toolbar:
+/// permission mode, model, the effort level.
 ///
-/// A line rather than the whole prompt because the terminal wrapped it across
-/// rows: a needle spanning a line break matches no single row, so the later
-/// lines would only make the search fail.
-fn prompt_label(text: &str) -> Option<String> {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let end = line
-        .char_indices()
-        .nth(PROMPT_LABEL_MAX)
-        .map_or(line.len(), |(i, _)| i);
-    Some(line[..end].to_string())
+/// Worked out here, in the hook, because the hook runs where the agent runs —
+/// on a remote host its transcript and settings are only readable there.
+fn claude_readout(event: &str, payload: &serde_json::Value, body: &mut serde_json::Value) {
+    let str_of = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(mode) = str_of(payload.get("permission_mode")) {
+        body["permission_mode"] = mode.into();
+    }
+    // A new session names its model. After that only a finished turn says
+    // which it is: the model that wrote the reply `Stop` carries. Any other
+    // reply in the transcript may be from before a `/model`, or from before
+    // a resume under another `--model` — and saying nothing beats that.
+    let model = str_of(payload.get("model")).or_else(|| {
+        if event != "stop" {
+            return None;
+        }
+        let reply = str_of(payload.get("last_assistant_message"))?;
+        let path = str_of(payload.get("transcript_path"))?;
+        let prompt_id = str_of(payload.get("prompt_id"));
+        turn_reply_model(Path::new(&path), &reply, prompt_id.as_deref())
+    });
+    if let Some(model) = &model {
+        body["model"] = model.clone().into();
+    }
+    // Claude says the level it is running at, when it says it — and at the
+    // end of a turn it says it whenever the model takes one, so a finished
+    // turn without it ran on a model that does not: that is reported as an
+    // empty level. So is one for a model Claude's own model catalog lists
+    // without effort levels. Otherwise the environment wins over the settings
+    // file, as it does for Claude — read only for a model this event names,
+    // since the file may set it per model.
+    let effort = str_of(payload.get("effort").and_then(|e| e.get("level"))).or_else(|| {
+        let model = model.as_deref()?;
+        if event == "stop" || catalog_says_no_effort(&claude_model_catalogs(), model) {
+            return Some(String::new());
+        }
+        std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
+            .ok()
+            .filter(|e| !e.is_empty())
+            .or_else(|| configured_effort(&claude_settings(), Some(model)))
+    });
+    if let Some(effort) = effort {
+        body["effort"] = effort.into();
+    }
+}
+
+/// The effort level Claude's settings give a model: the one set for that
+/// model if there is one, the general one otherwise.
+fn configured_effort(settings: &serde_json::Value, model: Option<&str>) -> Option<String> {
+    let level = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.get("effortLevel"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let per_model = settings.get("modelSettings");
+    model
+        .and_then(|m| {
+            let per_model = per_model?;
+            level(
+                per_model
+                    .get(m)
+                    .or_else(|| per_model.get(m.trim_end_matches("[1m]"))),
+            )
+        })
+        .or_else(|| level(Some(settings)))
+}
+
+fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".claude")))
+}
+
+fn claude_settings() -> serde_json::Value {
+    claude_config_dir()
+        .and_then(|d| std::fs::read(d.join("settings.json")).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::json!({}))
+}
+
+/// The model catalogs Claude Code keeps in its cache, one per account it
+/// has signed in with, as parsed JSON. None, if it has not fetched any.
+fn claude_model_catalogs() -> Vec<serde_json::Value> {
+    let Some(dir) = claude_config_dir().map(|d| d.join("cache").join("model-catalog")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_CONFIG_BYTES))
+        .filter_map(|e| std::fs::read(e.path()).ok())
+        .filter_map(|b| serde_json::from_slice(&b).ok())
+        .collect()
+}
+
+/// Whether Claude's model catalogs list `model` as taking no effort level —
+/// Haiku, say. Only a model they list counts, and only when every catalog
+/// that lists it agrees: a model they do not know may well take one.
+fn catalog_says_no_effort(catalogs: &[serde_json::Value], model: &str) -> bool {
+    let model = model.trim_end_matches("[1m]");
+    let mut listed = catalogs
+        .iter()
+        .filter_map(|c| c.pointer("/catalog/config/models")?.as_array())
+        .flatten()
+        .filter(|m| m.get("id").and_then(|id| id.as_str()) == Some(model))
+        .peekable();
+    listed.peek().is_some()
+        && listed.all(|m| {
+            m.pointer("/thinking/effort_options")
+                .and_then(|o| o.as_array())
+                .is_none_or(|o| o.is_empty())
+        })
+}
+
+/// The model that wrote `reply` to the prompt `prompt_id`, once the
+/// transcript has it as its latest words. Claude Code runs `Stop` before
+/// that write is always on disk, so this waits a little for it — reading
+/// the tail again only once the transcript has grown.
+fn turn_reply_model(path: &Path, reply: &str, prompt_id: Option<&str>) -> Option<String> {
+    let deadline = std::time::Instant::now() + TRANSCRIPT_CATCH_UP;
+    let mut read = None;
+    loop {
+        if let Some(model) =
+            transcript_tail(path, &mut read).and_then(|t| reply_model_in(&t, reply, prompt_id))
+        {
+            return Some(model);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(TRANSCRIPT_POLL);
+    }
+}
+
+/// The transcript's last [`TRANSCRIPT_TAIL`] bytes, unless it is still the
+/// length `read` last saw — then nothing new is in it.
+fn transcript_tail(path: &Path, read: &mut Option<u64>) -> Option<String> {
+    use std::io::{Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if read.replace(len) == Some(len) {
+        return None;
+    }
+    file.seek(SeekFrom::Start(len.saturating_sub(TRANSCRIPT_TAIL)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    Some(String::from_utf8_lossy(&tail).into_owned())
+}
+
+/// The model of the transcript's latest main-thread words, when those words
+/// are `reply` and come after the prompt `prompt_id` names — the same words
+/// can close an earlier turn too. Subagents' entries are skipped — they may
+/// run on a model of their own — and so are the notices Claude Code writes
+/// as replies.
+fn reply_model_in(jsonl: &str, reply: &str, prompt_id: Option<&str>) -> Option<String> {
+    let mut words = None;
+    let mut prompted = prompt_id.is_none();
+    for line in jsonl.lines() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = entry.get("type").and_then(|t| t.as_str());
+        if kind == Some("user") {
+            if prompt_id.is_some() && entry.get("promptId").and_then(|p| p.as_str()) == prompt_id {
+                prompted = true;
+                words = None;
+            }
+            continue;
+        }
+        if kind != Some("assistant")
+            || entry.get("isSidechain").and_then(|v| v.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        let model = message.get("model").and_then(|m| m.as_str());
+        let text: String = message
+            .get("content")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect();
+        if let Some(model) = model.filter(|m| *m != "<synthetic>")
+            && !text.trim().is_empty()
+        {
+            words = Some((model.to_string(), text));
+        }
+    }
+    let (model, text) = words.filter(|_| prompted)?;
+    (text.trim() == reply.trim()).then_some(model)
+}
+
+/// How much of an agent's message rides back to the terminal. It only ever
+/// fills a status line, and every byte of the sequence is a byte another
+/// writer on the same tty can cut in on.
+const MESSAGE_MAX: usize = 200;
+
+fn clip_chars(text: &str, max: usize) -> &str {
+    text.char_indices()
+        .nth(max)
+        .map_or(text, |(i, _)| &text[..i])
 }
 
 #[cfg(unix)]
@@ -196,13 +441,34 @@ fn write_to_controlling_tty(bytes: &[u8]) -> bool {
     false
 }
 
+/// Write `bytes` to the terminal device at `path`.
+///
+/// The device is opened without waiting. A blocking open of a terminal whose
+/// other end has gone — the pane closed while the agent was still running its
+/// session-end hook — waits for a carrier that never comes, and on macOS it
+/// waits holding the lock every lookup under `/dev` needs: the hook hangs, the
+/// agent it belongs to cannot finish exiting, and every new terminal, `ps`
+/// and `tty` on the machine hangs behind them. Once open, the device goes back
+/// to blocking writes, so a full output queue delays the sequence rather than
+/// cutting it short; a terminal with no other end fails the write instead.
 #[cfg(unix)]
 fn write_dev(path: &std::path::Path, bytes: &[u8]) -> bool {
     use std::io::Write as _;
-    match std::fs::OpenOptions::new().write(true).open(path) {
-        Ok(mut tty) => tty.write_all(bytes).and_then(|_| tty.flush()).is_ok(),
-        Err(_) => false,
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Ok(mut tty) = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+    else {
+        return false;
+    };
+    let fd = tty.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return false;
     }
+    tty.write_all(bytes).and_then(|_| tty.flush()).is_ok()
 }
 
 #[cfg(unix)]
@@ -444,6 +710,17 @@ impl HookAgent {
         matches!(self, HookAgent::Crush | HookAgent::Cursor)
     }
 
+    /// The `name` tty7's hook-map entries carry, for an agent that shows one.
+    /// Gemini CLI prints `Executing Hook: <name>` above its input while a hook
+    /// runs, and falls back to the whole command — the quoted path of the
+    /// tty7 binary and its arguments — for a hook without a name.
+    fn hook_entry_name(self) -> Option<&'static str> {
+        match self {
+            HookAgent::Gemini => Some("tty7"),
+            _ => None,
+        }
+    }
+
     /// The schema version a hook map has to declare at its root, if the agent
     /// demands one. Cursor ignores a `hooks.json` without `"version": 1`, so a
     /// file tty7 creates — or finds without one — gets it; one the user already
@@ -512,7 +789,7 @@ impl HookAgent {
     fn target_path(self, target: &HookTarget) -> PathBuf {
         match self {
             HookAgent::Claude => target.claude_settings_path(),
-            HookAgent::Codex => target.under_home(&[".codex", "hooks.json"]),
+            HookAgent::Codex => target.codex_hooks_path(),
             HookAgent::TraeCode => target.traecli_hooks_path(),
             HookAgent::Copilot => target.under_home(&[".copilot", "hooks", OWNED_FILE_STEM_JSON]),
             HookAgent::OpenCode => target.under(
@@ -528,7 +805,7 @@ impl HookAgent {
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
             }
-            HookAgent::Gemini => target.under_home(&[".gemini", "settings.json"]),
+            HookAgent::Gemini => target.gemini_settings_path(),
             HookAgent::Droid => target.under_home(&[".factory", "settings.json"]),
             HookAgent::Qwen => target.under_home(&[".qwen", "settings.json"]),
             // The Open Plugins layout, which Goose implements rather than
@@ -628,6 +905,29 @@ impl<'a> HookTarget<'a> {
             return PathBuf::from(dir).join("settings.json");
         }
         self.under_home(&[".claude", "settings.json"])
+    }
+
+    /// Codex keeps its whole home, `hooks.json` included, in `CODEX_HOME`
+    /// when that is set. Local-only, like the other overrides.
+    fn codex_hooks_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("hooks.json");
+        }
+        self.under_home(&[".codex", "hooks.json"])
+    }
+
+    /// Gemini CLI roots its user-level `.gemini` directory, settings included,
+    /// at `GEMINI_CLI_HOME` in place of the user's home when that is set.
+    /// Local-only, like the other overrides.
+    fn gemini_settings_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("GEMINI_CLI_HOME").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join(".gemini").join("settings.json");
+        }
+        self.under_home(&[".gemini", "settings.json"])
     }
 
     fn xdg_config_dir(&self) -> PathBuf {
@@ -1111,11 +1411,15 @@ fn hook_map_state(
             .get("hooks")
             .and_then(|h| h.get(hook_event))
             .and_then(|e| e.as_array())
-            .and_then(|list| list.iter().find_map(|m| marker_command(m, &marker)));
+            .and_then(|list| list.iter().find_map(|m| marker_hook(m, &marker)));
         match ours {
-            Some(cmd) => {
+            Some(hook) => {
                 any = true;
-                if cmd != target.hook_command(agent, tty7_event) {
+                let command = hook.get("command").and_then(|c| c.as_str());
+                let name = hook.get("name").and_then(|n| n.as_str());
+                if command != Some(target.hook_command(agent, tty7_event).as_str())
+                    || name != agent.hook_entry_name()
+                {
                     complete = false;
                 }
             }
@@ -1186,9 +1490,11 @@ fn hook_map_install(
         if agent.flat_hook_map() {
             list.push(serde_json::json!({ "command": command }));
         } else {
-            list.push(serde_json::json!({
-                "hooks": [{ "type": "command", "command": command }]
-            }));
+            let mut hook = serde_json::json!({ "type": "command", "command": command });
+            if let Some(name) = agent.hook_entry_name() {
+                hook["name"] = serde_json::Value::String(name.to_string());
+            }
+            list.push(serde_json::json!({ "hooks": [hook] }));
         }
     }
 
@@ -1240,22 +1546,26 @@ fn hook_map_uninstall(
 /// same level as its `matcher`. Both are one list under `hooks.<Event>`, so
 /// the state reader, the installer and the uninstaller all stay shared.
 fn marker_command<'a>(entry: &'a serde_json::Value, marker: &str) -> Option<&'a str> {
-    if let Some(command) = entry
-        .get("command")
-        .and_then(|c| c.as_str())
-        .filter(|c| c.contains(marker))
-    {
-        return Some(command);
+    marker_hook(entry, marker)?.get("command")?.as_str()
+}
+
+/// The object that holds tty7's command in an entry of a hook map — the
+/// entry itself when it is flat, else the hook nested in it — so the state
+/// reader can check the fields beside the command too.
+fn marker_hook<'a>(entry: &'a serde_json::Value, marker: &str) -> Option<&'a serde_json::Value> {
+    let ours = |h: &serde_json::Value| {
+        h.get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.contains(marker))
+    };
+    if ours(entry) {
+        return Some(entry);
     }
     entry
         .get("hooks")
         .and_then(|h| h.as_array())?
         .iter()
-        .find_map(|h| {
-            h.get("command")
-                .and_then(|c| c.as_str())
-                .filter(|c| c.contains(marker))
-        })
+        .find(|h| ours(h))
 }
 
 fn toml_hooks_state(
@@ -1867,7 +2177,10 @@ export default { id: "tty7", server, setup }
 /// rather than two copies drifting apart.
 fn pi_extension_ts(target: &HookTarget, agent: HookAgent) -> Option<String> {
     let (slug, package) = match agent {
-        HookAgent::Pi => ("pi", "@mariozechner/pi-coding-agent"),
+        // Pi moved from `@mariozechner/` to `@earendil-works/`. Current Pi
+        // resolves both names for extensions, and the import is type-only, so
+        // it is erased before an older Pi that knows only the old name runs it.
+        HookAgent::Pi => ("pi", "@earendil-works/pi-coding-agent"),
         HookAgent::OhMyPi => ("omp", "@oh-my-pi/pi-coding-agent"),
         HookAgent::PrimeAgent => ("prime-agent", "@earendil-works/pi-coding-agent"),
         _ => return None,
@@ -1910,8 +2223,18 @@ export default function (pi: ExtensionAPI) {{
   // What the pane showed before a UI prompt put it on "waiting", so closing
   // the prompt can put it back.
   let turn = "session-start";
+  // Whether this build says when a run is over for good. agent_end also ends
+  // each attempt an automatic retry, a compaction or a queued message picks
+  // up again, and reading that as "done" calls the pane finished while it
+  // still works. Pi's agent_settled comes once the run is really over, and a
+  // build that sends it shows so the first time it does. Nothing earlier
+  // tells: on() returns nothing in Pi or Oh My Pi, and a build that takes the
+  // name without ever sending it must still end its turns on agent_end.
+  let settles = false;
   pi.on("agent_start", (_event, ctx) => emit((turn = "prompt-submit"), ctx));
-  pi.on("agent_end", (_event, ctx) => emit((turn = "stop"), ctx));
+  pi.on("agent_end", (_event, ctx) => {{
+    if (!settles) emit((turn = "stop"), ctx);
+  }});
   pi.on("session_shutdown", (_event, ctx) => emit("session-end", ctx));
   // Last, and guarded: the three above already worked, so a Pi build that
   // rejects this event name must not take them — or the whole extension —
@@ -1936,6 +2259,24 @@ export default function (pi: ExtensionAPI) {{
   try {{
     pi.on("ui_prompt_end", (_event, ctx) => emit(turn, ctx));
   }} catch {{}}
+  try {{
+    pi.on("agent_settled" as any, (_event: unknown, ctx: SessionCtx) => {{
+      settles = true;
+      emit((turn = "stop"), ctx);
+    }});
+  }} catch {{}}
+  // Oh My Pi asks before running a tool through events of its own rather
+  // than Pi's UI-prompt pair, and announces its retries — which follow an
+  // agent_end — where Pi does not.
+  try {{
+    pi.on("tool_approval_requested" as any, (_event: unknown, ctx: SessionCtx) =>
+      emit("permission-request", ctx),
+    );
+    pi.on("tool_approval_resolved" as any, (_event: unknown, ctx: SessionCtx) => emit(turn, ctx));
+    pi.on("auto_retry_start" as any, (_event: unknown, ctx: SessionCtx) =>
+      emit((turn = "prompt-submit"), ctx),
+    );
+  }} catch {{}}
 }}
 "#
     ))
@@ -1944,6 +2285,222 @@ export default function (pi: ExtensionAPI) {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hook whose pane closed under it gives up instead of waiting on the
+    /// terminal's other end for good.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_with_its_other_end_gone_fails_the_write_at_once() {
+        // Both ends are opened close-on-exec from the start: the other tests
+        // spawn processes on threads of their own, and a child that inherited
+        // the pane's end would keep it open after it is closed here, so the
+        // write would go through.
+        let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+        let master = unsafe { libc::posix_openpt(flags) };
+        assert!(master >= 0);
+        assert_eq!(unsafe { libc::grantpt(master) }, 0);
+        assert_eq!(unsafe { libc::unlockpt(master) }, 0);
+        let name = unsafe { std::ffi::CStr::from_ptr(libc::ptsname(master)) }
+            .to_string_lossy()
+            .into_owned();
+        let path = std::ffi::CString::new(name.clone()).unwrap();
+        let slave = unsafe { libc::open(path.as_ptr(), flags) };
+        assert!(slave >= 0);
+        // The agent still holds its end; the pane's is gone.
+        unsafe { libc::close(master) };
+
+        // A child another test forked a moment ago still holds a copy of the
+        // pane's end until it gets to exec, and a write in that moment goes
+        // through; one made once it has let go fails. None may wait.
+        let mut wrote = Ok(true);
+        for _ in 0..50 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let name = name.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(write_dev(std::path::Path::new(&name), b"x"));
+            });
+            wrote = rx.recv_timeout(std::time::Duration::from_secs(5));
+            if wrote != Ok(true) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        unsafe { libc::close(slave) };
+        assert_eq!(wrote, Ok(false));
+    }
+
+    /// The turn's reply names the model: a subagent's entry after it and
+    /// Claude Code's own synthetic notices are not the conversation's, and
+    /// the thinking entry before the words carries none.
+    #[test]
+    fn the_readout_takes_the_model_that_wrote_the_turns_reply() {
+        let jsonl = [
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Earlier."}]}}"#,
+            r#"{"type":"user","promptId":"p2","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"thinking","thinking":""}]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"Hi there!\n"}]}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Hi there!"}]}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#,
+            "not json",
+        ]
+        .join("\n");
+        assert_eq!(
+            reply_model_in(&jsonl, "Hi there!", Some("p2")).as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            reply_model_in(&jsonl, "Hi there!", None).as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(reply_model_in("", "Hi there!", Some("p2")), None);
+    }
+
+    /// Until the reply is written, the transcript's latest words are the
+    /// previous turn's — possibly under another model, possibly the very
+    /// same words — and say nothing.
+    #[test]
+    fn a_transcript_behind_the_turn_names_no_model() {
+        let jsonl = [
+            r#"{"type":"user","promptId":"p1","message":{"content":"say hi"}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Hi!"}]}}"#,
+        ]
+        .join("\n");
+        assert_eq!(reply_model_in(&jsonl, "Hello.", Some("p1")), None);
+        assert_eq!(reply_model_in(&jsonl, "Hi!", Some("p2")), None);
+        let asked =
+            jsonl + "\n" + r#"{"type":"user","promptId":"p2","message":{"content":"say hi"}}"#;
+        assert_eq!(reply_model_in(&asked, "Hi!", Some("p2")), None);
+    }
+
+    #[test]
+    fn the_readout_rides_the_hook_sequence() {
+        let dir = std::env::temp_dir().join(format!("tty7-readout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("t.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"Done."}]}}"#,
+        )
+        .unwrap();
+        let stdin = |extra: serde_json::Value| {
+            let mut payload = serde_json::json!({
+                "session_id": "s",
+                "permission_mode": "plan",
+                "transcript_path": transcript,
+            });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            payload.to_string()
+        };
+        let readout = |event: &str, stdin: &str| {
+            let seq = build_hook_sequence("claude", event, stdin);
+            crate::core::cli_agent::parse_agent_event(
+                seq.strip_prefix(b"\x1b]")
+                    .unwrap()
+                    .strip_suffix(b"\x07")
+                    .unwrap(),
+            )
+            .unwrap()
+            .readout
+        };
+        let stop = readout(
+            "stop",
+            &stdin(serde_json::json!({
+                "last_assistant_message": "Done.",
+                "effort": { "level": "xhigh" },
+            })),
+        );
+        let submit = readout("prompt-submit", &stdin(serde_json::json!({})));
+        let no_effort = readout(
+            "stop",
+            &stdin(serde_json::json!({ "last_assistant_message": "Done." })),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stop.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(stop.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            stop.effort.as_deref(),
+            Some("xhigh"),
+            "the level Claude reports is the one it runs at"
+        );
+        assert_eq!(
+            (submit.model, submit.effort),
+            (None, None),
+            "before its reply a turn says nothing of the model it runs on"
+        );
+        assert_eq!(
+            no_effort.effort.as_deref(),
+            Some(""),
+            "a turn that ends without a level ran on a model that takes none"
+        );
+    }
+
+    #[test]
+    fn a_model_the_catalog_lists_without_effort_levels_takes_none() {
+        let catalog = serde_json::json!({
+            "version": 2,
+            "catalog": { "config": { "models": [
+                {
+                    "id": "claude-opus-5-5",
+                    "thinking": {
+                        "type": "effort",
+                        "effort_options": [{ "id": "low" }, { "id": "high" }],
+                    },
+                },
+                { "id": "claude-haiku-4-5-20251001", "thinking": { "type": "none" } },
+            ] } },
+        });
+        let catalogs = [catalog];
+        assert!(catalog_says_no_effort(
+            &catalogs,
+            "claude-haiku-4-5-20251001"
+        ));
+        assert!(!catalog_says_no_effort(&catalogs, "claude-opus-5-5"));
+        assert!(!catalog_says_no_effort(&catalogs, "claude-opus-5-5[1m]"));
+        assert!(
+            !catalog_says_no_effort(&catalogs, "claude-new-model"),
+            "a model the catalog does not know may take a level"
+        );
+        assert!(!catalog_says_no_effort(&[], "claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn an_effort_set_for_the_model_wins_over_the_general_one() {
+        let settings = serde_json::json!({
+            "effortLevel": "high",
+            "modelSettings": { "claude-opus-5-5": { "effortLevel": "medium" } },
+        });
+        assert_eq!(
+            configured_effort(&settings, Some("claude-opus-5-5")).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            configured_effort(&settings, Some("claude-opus-5-5[1m]")).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            configured_effort(&settings, Some("claude-sonnet-5-5")).as_deref(),
+            Some("high")
+        );
+        assert_eq!(configured_effort(&settings, None).as_deref(), Some("high"));
+        assert_eq!(configured_effort(&serde_json::json!({}), None), None);
+    }
+
+    #[test]
+    fn other_agents_carry_no_readout() {
+        let stdin = r#"{"session_id":"s","permission_mode":"plan"}"#;
+        let seq = build_hook_sequence("codex", "stop", stdin);
+        let ev = crate::core::cli_agent::parse_agent_event(
+            seq.strip_prefix(b"\x1b]")
+                .unwrap()
+                .strip_suffix(b"\x07")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ev.readout, Default::default());
+    }
 
     /// The exhaustive match keeps every detected agent mapped; this keeps the
     /// other direction honest, so a hooked agent cannot become unreachable
@@ -2013,68 +2570,40 @@ mod tests {
         crate::core::cli_agent::parse_agent_event(&seq[2..seq.len() - 1]).expect("parses")
     }
 
+    /// What the user typed never rides along: nothing downstream reads it,
+    /// and a pasted prompt made the sequence long enough for the agent's own
+    /// output to land in the middle of it.
     #[test]
-    fn a_submitted_prompt_rides_back_as_the_turns_label() {
-        let ev = round_trip(
-            "claude",
-            "prompt-submit",
-            r#"{"prompt":"restore the outline","session_id":"s-1"}"#,
-        );
-        assert_eq!(ev.prompt.as_deref(), Some("restore the outline"));
-        assert_eq!(
-            ev.message, None,
-            "a prompt is not a message; the turn starts with nothing said back"
-        );
-    }
-
-    #[test]
-    fn a_prompt_is_cut_to_its_first_line() {
-        let ev = round_trip(
-            "claude",
-            "prompt-submit",
-            r#"{"prompt":"\n\n  what did we decide  \nand then some more\nand more"}"#,
-        );
-        assert_eq!(
-            ev.prompt.as_deref(),
-            Some("what did we decide"),
-            "later lines wrapped when they were drawn and would only fail the search"
-        );
-    }
-
-    #[test]
-    fn a_pasted_file_cannot_cost_the_whole_event() {
+    fn a_submitted_prompt_stays_out_of_the_sequence() {
         let prompt = "x".repeat(64 * 1024);
+        let seq = build_hook_sequence(
+            "claude",
+            "prompt-submit",
+            &serde_json::json!({ "prompt": prompt, "session_id": "s-1" }).to_string(),
+        );
+        assert!(!String::from_utf8_lossy(&seq).contains("xxxx"));
+        assert!(seq.len() < 200, "{} bytes", seq.len());
         let ev = round_trip(
             "claude",
             "prompt-submit",
-            &serde_json::json!({ "prompt": prompt }).to_string(),
+            r#"{"prompt":"hi","session_id":"s-1"}"#,
         );
         assert_eq!(
-            ev.prompt.map(|p| p.chars().count()),
-            Some(PROMPT_LABEL_MAX),
-            "the tokenizer abandons an oversized payload rather than truncating it"
+            ev.kind,
+            crate::core::cli_agent::AgentEventKind::PromptSubmit
         );
+        assert_eq!(ev.message, None, "a prompt is not a message");
     }
 
     #[test]
-    fn a_prompt_of_wide_characters_is_cut_on_a_character_boundary() {
-        let prompt = "把大纲恢复一下".repeat(100);
+    fn a_long_message_is_cut_on_a_character_boundary() {
         let ev = round_trip(
-            "claude",
-            "prompt-submit",
-            &serde_json::json!({ "prompt": prompt }).to_string(),
+            "gemini",
+            "permission-request",
+            &serde_json::json!({ "message": "允许".repeat(1000) }).to_string(),
         );
-        assert_eq!(ev.prompt.map(|p| p.chars().count()), Some(PROMPT_LABEL_MAX));
-    }
-
-    #[test]
-    fn an_agent_that_reports_no_prompt_carries_none() {
-        assert_eq!(round_trip("codex", "stop", "{}").prompt, None);
-        assert_eq!(
-            round_trip("claude", "prompt-submit", r#"{"prompt":"   "}"#).prompt,
-            None,
-            "whitespace is not a label"
-        );
+        assert_eq!(ev.message.map(|m| m.chars().count()), Some(MESSAGE_MAX));
+        assert_eq!(clip_chars("short", MESSAGE_MAX), "short");
     }
 
     #[test]
@@ -2534,6 +3063,32 @@ mod tests {
         assert_eq!(state.session_id.as_deref(), Some("cur-1"));
     }
 
+    /// A Pi bridge written before Pi changed its package name is ours but
+    /// stale, so launch's refresh rewrites it with the current import.
+    #[test]
+    fn a_pi_bridge_importing_the_old_package_is_refreshed() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-pi-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = HookTarget::remote(&*host, base.clone());
+        let path = HookAgent::Pi.target_path(&target);
+        let current = pi_extension_ts(&target, HookAgent::Pi).expect("pi bridge builds");
+        let old = current.replace(
+            "@earendil-works/pi-coding-agent",
+            "@mariozechner/pi-coding-agent",
+        );
+        assert_ne!(old, current);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &old).unwrap();
+
+        assert_eq!(hooks_state(&target, HookAgent::Pi), HooksState::Outdated);
+        assert_eq!(refresh_hooks(&target), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        assert_eq!(hooks_state(&target, HookAgent::Pi), HooksState::Installed);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Cursor's `hooks.json` is flat like Crush's, but it is also ignored
     /// outright without `"version": 1` at the root — so a file tty7 creates
     /// has to carry one, and a user's own file keeps whatever it declares.
@@ -2616,6 +3171,80 @@ mod tests {
         assert_eq!(read()["version"], 1);
         assert_eq!(
             hooks_state(&target, HookAgent::Cursor),
+            HooksState::Installed
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Gemini shows a running hook by its `name`, else by its whole command,
+    /// so tty7's entries carry a short one — and an install from before they
+    /// did reads as outdated, for the launch-time refresh to name it.
+    #[test]
+    fn gemini_hooks_carry_a_short_name_and_unnamed_ones_are_refreshed() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-gemini-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = HookTarget::remote(&*host, base.clone());
+        let config = HookAgent::Gemini.target_path(&target);
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap()
+        };
+
+        install_hooks(&target, HookAgent::Gemini).expect("install succeeds");
+        for (hook, event) in GEMINI_HOOK_EVENTS {
+            assert_eq!(
+                read()["hooks"][*hook][0]["hooks"][0],
+                serde_json::json!({
+                    "type": "command",
+                    "command": target.hook_command(HookAgent::Gemini, event),
+                    "name": "tty7",
+                }),
+                "{hook}"
+            );
+        }
+
+        // What an earlier tty7 wrote: the same commands, no name.
+        let mut unnamed = serde_json::json!({ "ui": { "theme": "Default" }, "hooks": {} });
+        for (hook, event) in GEMINI_HOOK_EVENTS {
+            unnamed["hooks"][*hook] = serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": target.hook_command(HookAgent::Gemini, event),
+                }]
+            }]);
+        }
+        std::fs::write(&config, unnamed.to_string()).unwrap();
+        assert_eq!(
+            hooks_state(&target, HookAgent::Gemini),
+            HooksState::Outdated
+        );
+        assert_eq!(refresh_hooks(&target), 1);
+        let refreshed = read();
+        assert_eq!(refreshed["ui"], unnamed["ui"]);
+        for (hook, _) in GEMINI_HOOK_EVENTS {
+            let entries = refreshed["hooks"][*hook].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{hook}: replaced, not doubled");
+            assert_eq!(entries[0]["hooks"][0]["name"], "tty7", "{hook}");
+        }
+        assert_eq!(
+            hooks_state(&target, HookAgent::Gemini),
+            HooksState::Installed
+        );
+
+        // Nobody else's entries get a name, and a named one of theirs is no
+        // reason to call Claude's hooks outdated.
+        install_hooks(&target, HookAgent::Claude).unwrap();
+        let claude = HookAgent::Claude.target_path(&target);
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&claude).unwrap()).unwrap();
+        assert!(
+            written["hooks"]["Stop"][0]["hooks"][0]
+                .get("name")
+                .is_none()
+        );
+        assert_eq!(
+            hooks_state(&target, HookAgent::Claude),
             HooksState::Installed
         );
 
@@ -3221,7 +3850,7 @@ mod tests {
         );
 
         for (agent, slug, package) in [
-            (HookAgent::Pi, "pi", "@mariozechner/pi-coding-agent"),
+            (HookAgent::Pi, "pi", "@earendil-works/pi-coding-agent"),
             (HookAgent::OhMyPi, "omp", "@oh-my-pi/pi-coding-agent"),
             (
                 HookAgent::PrimeAgent,
@@ -3246,6 +3875,10 @@ mod tests {
                 "session_shutdown",
                 "ui_prompt_start",
                 "ui_prompt_end",
+                "agent_settled",
+                "tool_approval_requested",
+                "tool_approval_resolved",
+                "auto_retry_start",
             ] {
                 assert!(
                     bridge.contains(&format!(r#"pi.on("{event}""#)),
@@ -3894,6 +4527,60 @@ mod tests {
         uninstall_hooks(&t, HookAgent::Claude).expect("uninstall is idempotent");
 
         unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Codex moved to `CODEX_HOME` reads its hooks from there, and a
+    /// `hooks.json` under `~/.codex` is one it never looks at.
+    #[test]
+    fn codex_hooks_live_in_codex_home_when_it_is_set() {
+        let dir = std::env::temp_dir().join(format!("tty7-codex-home-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("CODEX_HOME", &dir) };
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        assert_eq!(HookAgent::Codex.target_path(&t), dir.join("hooks.json"));
+        assert_eq!(hooks_state(&t, HookAgent::Codex), HooksState::NotInstalled);
+        let remote_host = FakeRemote::shared();
+        let remote = HookTarget::remote(&*remote_host, PathBuf::from("/home/me"));
+        assert_eq!(
+            HookAgent::Codex.target_path(&remote),
+            PathBuf::from("/home/me/.codex/hooks.json"),
+            "a local CODEX_HOME says nothing about a remote machine"
+        );
+
+        unsafe { std::env::remove_var("CODEX_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Gemini CLI moved to `GEMINI_CLI_HOME` keeps its `.gemini` directory
+    /// there, and `~/.gemini/settings.json` is a file it never reads.
+    #[test]
+    fn gemini_hooks_live_under_gemini_cli_home_when_it_is_set() {
+        let dir =
+            std::env::temp_dir().join(format!("tty7-gemini-home-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("GEMINI_CLI_HOME", &dir) };
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        assert_eq!(
+            HookAgent::Gemini.target_path(&t),
+            dir.join(".gemini").join("settings.json")
+        );
+        assert_eq!(hooks_state(&t, HookAgent::Gemini), HooksState::NotInstalled);
+        let remote_host = FakeRemote::shared();
+        let remote = HookTarget::remote(&*remote_host, PathBuf::from("/home/me"));
+        assert_eq!(
+            HookAgent::Gemini.target_path(&remote),
+            PathBuf::from("/home/me/.gemini/settings.json"),
+            "a local GEMINI_CLI_HOME says nothing about a remote machine"
+        );
+
+        unsafe { std::env::remove_var("GEMINI_CLI_HOME") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 
