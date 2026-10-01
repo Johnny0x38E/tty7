@@ -31,7 +31,9 @@ pub fn snapshot(shell_pid: u32, fg_pgid: Option<i32>) -> PaneProcs {
     if let PortProbe::Unavailable(detail) = &probe {
         note_probe_failure(shell_pid, detail);
     }
-    finish(procs, ports, probe)
+    let mut out = finish(procs, ports, probe);
+    crate::daemon::procstat::fill(&mut out.procs);
+    out
 }
 
 /// How long the same probe failure waits before it is written down again.
@@ -209,6 +211,7 @@ fn walk(table: &HashMap<u32, Row>, shell_pid: u32, fg_pgid: Option<i32>) -> Vec<
             name: row.name.clone(),
             depth,
             foreground: fg_pgid.is_some_and(|g| g as u32 == row.pgid),
+            ..Default::default()
         });
         if depth + 1 > MAX_DEPTH {
             continue;
@@ -1071,18 +1074,21 @@ mod tests {
                 name: "zsh".into(),
                 depth: 0,
                 foreground: false,
+                ..Default::default()
             },
             ProcEntry {
                 pid: 9000,
                 name: "go".into(),
                 depth: 1,
                 foreground: true,
+                ..Default::default()
             },
             ProcEntry {
                 pid: 9001,
                 name: "main".into(),
                 depth: 2,
                 foreground: true,
+                ..Default::default()
             },
         ];
         let report = "p9001\nf3\nn*:8080\nf5\nn[::]:8080\np100\n";

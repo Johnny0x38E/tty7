@@ -464,13 +464,23 @@ pub struct ManagedForward {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcEntry {
     pub pid: u32,
     pub name: String,
     pub depth: u8,
     #[serde(default)]
     pub foreground: bool,
+    /// Resident memory in bytes, total CPU time (user + system) in ns, and an
+    /// opaque start stamp that tells a reused pid from the process it replaced.
+    /// `None` from a daemon that predates them or could not read them; not a
+    /// `PROTOCOL_VERSION` bump, since either side skips what it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

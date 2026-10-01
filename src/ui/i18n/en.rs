@@ -1379,6 +1379,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelNoChangesHint => "The working tree is clean.",
         L10nKey::PanelSessionSubtitle => "Session",
         L10nKey::PanelProcessesSubtitle => "Processes",
+        L10nKey::PanelProcessesTotal => "Total",
         L10nKey::PanelPortsSubtitle => "Ports",
         L10nKey::PanelPortsUnsupported => "That machine's tty7-server is too old to list ports.",
         L10nKey::PanelPortsProbeFailed => "Couldn't check what this pane is listening on.",

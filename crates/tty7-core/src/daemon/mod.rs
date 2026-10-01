@@ -13,6 +13,7 @@ pub mod mobile;
 pub mod pane;
 pub mod pidfile;
 pub mod procinfo;
+pub mod procstat;
 pub mod protocol;
 pub(crate) mod remote;
 pub mod remote_link;
