@@ -516,6 +516,10 @@ impl Tty7App {
             .get(self.workspace)
             .is_some_and(|w| w.is_remote());
 
+        // A reveal whose row is not drawn this frame (folded away, or the tab
+        // gone) is dropped, so it cannot fire when the row turns up later.
+        let reveal = self.sidebar_reveal.get();
+        let mut reveal_drawn = false;
         for (n, (group_slot, group_ix)) in blocks.into_iter().enumerate() {
             if n == first_unpinned && show_divider {
                 list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
@@ -594,6 +598,7 @@ impl Tty7App {
             for (slot, i) in visible.into_iter().enumerate() {
                 let badge_pos = badge_pos[i];
                 let tab = &self.tabs[i];
+                reveal_drawn |= reveal == Some(tab.tree_id.get());
                 let is_active = i == active;
                 let ssh_dot = self.tab_ssh_dot(tab, cx);
                 let asleep = tab.is_asleep();
@@ -1039,12 +1044,36 @@ impl Tty7App {
                                 // reads the slots of one group, a pane dropped
                                 // on the sidebar reads every row there is.
                                 let by_tab = self.sidebar_slots.clone();
-                                move |bounds, _window, _cx| {
+                                let reveal = self.sidebar_reveal.clone();
+                                let scroll = self.sidebar_scroll.clone();
+                                let id = tab.tree_id.get();
+                                // The header sits directly above a group's
+                                // first row, one gap away.
+                                let lead = match slot == 0 && section.name.is_some() {
+                                    true => px(HEADER_HEIGHT + ROW_GAP),
+                                    false => px(0.),
+                                };
+                                move |bounds, window, _cx| {
                                     if let Some(s) = slots.borrow_mut().get_mut(slot) {
                                         *s = bounds;
                                     }
                                     if let Some(s) = by_tab.borrow_mut().get_mut(i) {
                                         *s = bounds;
+                                    }
+                                    if reveal.get() == Some(id) {
+                                        reveal.set(None);
+                                        let view = scroll.bounds();
+                                        let shift = reveal_shift(
+                                            (bounds.top(), bounds.bottom()),
+                                            lead,
+                                            (view.top(), view.bottom()),
+                                        );
+                                        if shift != px(0.) {
+                                            let mut offset = scroll.offset();
+                                            offset.y += shift;
+                                            scroll.set_offset(offset);
+                                            window.refresh();
+                                        }
                                     }
                                 }
                             },
@@ -1646,6 +1675,9 @@ impl Tty7App {
                 }
                 _ => block.into_any_element(),
             });
+        }
+        if !reveal_drawn {
+            self.sidebar_reveal.set(None);
         }
         if show_divider && !divider_drawn {
             list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
@@ -2965,6 +2997,23 @@ impl Section {
     }
 }
 
+/// How far to move the sidebar's scroll offset so a newly active row shows.
+/// A row with any part in view stays put — clicking a row must not move the
+/// list under the pointer; one out of view comes in at the nearest edge.
+/// `lead` is what sits on top of the row and belongs with it — its group's
+/// header, for the first row — so a row coming in from above brings the
+/// name of the group it is in, not just itself.
+fn reveal_shift(row: (Pixels, Pixels), lead: Pixels, view: (Pixels, Pixels)) -> Pixels {
+    let ((top, bottom), (view_top, view_bottom)) = (row, view);
+    if bottom <= view_top {
+        view_top - (top - lead)
+    } else if top >= view_bottom {
+        view_bottom - bottom
+    } else {
+        px(0.)
+    }
+}
+
 /// The sidebar's sections, top to bottom: every pinned group in the user's
 /// order — an empty one too, since a kept group stays until it is deleted —
 /// then the auto groups in the order their first tab appears, then
@@ -4199,6 +4248,30 @@ mod fold_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_shift_moves_only_rows_out_of_view() {
+        let view = (px(100.), px(400.));
+        // On screen, or cut by an edge: a click there scrolls nothing.
+        assert_eq!(reveal_shift((px(200.), px(230.)), px(0.), view), px(0.));
+        assert_eq!(reveal_shift((px(90.), px(120.)), px(0.), view), px(0.));
+        assert_eq!(reveal_shift((px(390.), px(420.)), px(0.), view), px(0.));
+        // Above: its top lands on the top edge.
+        assert_eq!(reveal_shift((px(10.), px(40.)), px(0.), view), px(90.));
+        // Below: its bottom lands on the bottom edge.
+        assert_eq!(reveal_shift((px(500.), px(530.)), px(0.), view), px(-130.));
+    }
+
+    #[test]
+    fn a_first_row_revealed_from_above_brings_its_header() {
+        let view = (px(100.), px(400.));
+        // The header's top, not the row's, lands on the top edge.
+        assert_eq!(reveal_shift((px(10.), px(40.)), px(23.), view), px(113.));
+        // A header half under the top edge, row on screen: still nothing.
+        assert_eq!(reveal_shift((px(110.), px(140.)), px(23.), view), px(0.));
+        // Below: the header is already above the row, only the bottom counts.
+        assert_eq!(reveal_shift((px(500.), px(530.)), px(23.), view), px(-130.));
+    }
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)

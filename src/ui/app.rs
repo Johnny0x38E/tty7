@@ -1037,6 +1037,12 @@ pub struct Tty7App {
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
+    /// The tab whose sidebar row is brought into view the next time it is
+    /// drawn. Read by the row, not by `activate`: a new tab has no row yet,
+    /// and the list's children are groups, so a tab index is no child index.
+    /// Keyed by the tab's id, not its index, so a reorder or close in between
+    /// cannot point it at another tab.
+    pub(crate) sidebar_reveal: Rc<Cell<Option<tty7_core::core::machine::TabId>>>,
     pub(crate) reorder: Rc<RefCell<Option<crate::ui::reorder::Reorder>>>,
     /// The pane the pointer is over, so only that one offers its drag handle.
     pub(crate) pane_hover: Rc<Cell<Option<gpui::EntityId>>>,
@@ -1705,6 +1711,7 @@ impl Tty7App {
             right_panel_tab,
             sidebar_collapsed,
             sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_reveal: Rc::new(Cell::new(None)),
             reorder: Rc::new(RefCell::new(None)),
             pane_hover: Rc::new(Cell::new(None)),
             pane_drag: Rc::new(RefCell::new(None)),
@@ -5277,7 +5284,8 @@ impl Tty7App {
                     .any(|l| l.entity_id() == leaf.entity_id())
             });
             self.maybe_refresh_diff_overlay(cx);
-            self.sidebar_scroll.scroll_to_item(index);
+            self.sidebar_reveal
+                .set(Some(self.tabs[index].tree_id.get()));
             if self.code_panel_visible() {
                 self.file_tree_refresh_roots(window, cx);
                 self.file_tree.focus_handle.focus(window, cx);
