@@ -2212,6 +2212,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarUngroupedGroup => "Ungrouped",
         L10nKey::SidebarMoveToGroup => "Move to Group",
         L10nKey::SidebarNewGroup => "New Group…",
+        L10nKey::SidebarRemoveFromGroup => "Remove from Group",
         L10nKey::SidebarNewGroupName => "New Group",
         L10nKey::SidebarRenameGroup => "Rename Group",
         L10nKey::SidebarPinGroup => "Pin Group",

@@ -8,7 +8,9 @@ use gpui_component::input::Input;
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Selectable as _, Side, Sizable as _, h_flex,
+};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
@@ -1993,13 +1995,25 @@ impl Tty7App {
         index: usize,
         below_wording: bool,
         app: &gpui::WeakEntity<Self>,
-        window: &Window,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
         let Some(entity) = app.upgrade() else {
             return menu;
         };
         let this = entity.read(cx);
+        // Taken before `this` is let go for the Move to Group submenu below.
+        let sidebar =
+            cx.global::<Config>().tab_bar_position == crate::core::config::TabBarPosition::Left;
+        let move_targets = sidebar.then(|| {
+            let keys = this.sidebar_group_keys(cx);
+            crate::ui::tab_sidebar::move_targets(&keys, &this.sidebar_groups, index)
+        });
+        let in_kept_group = this
+            .tabs
+            .get(index)
+            .and_then(|t| t.group.get())
+            .is_some_and(|g| this.sidebar_groups.contains(g));
         let tab_count = this.tabs.len();
         let cwd = this.tab_cwd_text(index, window, cx);
         let has_cwd = cwd.is_some();
@@ -2067,48 +2081,75 @@ impl Tty7App {
             );
         }
 
-        // Where this tab sits, and where it could be put instead.
+        // Where this tab sits, and where it could be put instead: every group
+        // the sidebar draws, auto ones included, behind a submenu — a sidebar
+        // grouping by repo can hold dozens, far too many to lay out flat.
         //
-        // Laid out flat rather than behind a "Move to Group ▸" submenu: there
-        // are never many pinned groups — they are kept by hand — so a submenu
-        // would cost a second click to show two or three items, and
-        // `PopupMenu::submenu` wants a `&mut Context` this function does not
-        // have. The label above them says what the block is.
+        // An auto group's membership is its tabs' cwds, so a tab can only be
+        // put in one by keeping the group: picking it pins the group (as its
+        // header's pin does) and the tab with it. Remove from Group, offered
+        // only for a tab kept in a group, hands it back to auto grouping.
         //
-        // No way back to auto grouping here: that is a drag below the divider,
-        // the one place in the sidebar where "not kept by hand" is drawn.
-        // Offered only with the tabs in the sidebar for the same reason — a
-        // group is something the sidebar draws, and "move to group" from the
-        // top tab bar would name something the user cannot see.
-        if cx.global::<Config>().tab_bar_position == crate::core::config::TabBarPosition::Left {
-            let here = this
-                .tabs
-                .get(index)
-                .and_then(|t| t.group.get())
-                .filter(|g| this.sidebar_groups.contains(*g));
-            menu = menu
-                .separator()
-                .item(PopupMenuItem::label(t(L10nKey::SidebarMoveToGroup)));
-            for (id, name) in this.pinned_group_names() {
-                menu = menu.item(
-                    PopupMenuItem::new(name)
-                        .checked(here == Some(id))
-                        .on_click({
+        // Offered only with the tabs in the sidebar — a group is something the
+        // sidebar draws, and "move to group" from the top tab bar would name
+        // something the user cannot see.
+        if let Some(targets) = move_targets {
+            let app = app.clone();
+            menu = menu.separator().submenu(
+                t(L10nKey::SidebarMoveToGroup),
+                window,
+                cx,
+                move |sub, _window, _cx| {
+                    // A left check makes every row of the menu reserve a
+                    // check column, so the whole submenu sat one icon's
+                    // width right of the tab menu beside it. On the right,
+                    // its labels line up with the parent's.
+                    let mut sub = sub.check_side(Side::Right);
+                    for (i, target) in targets.iter().enumerate() {
+                        // Pinned groups, then the auto ones, as the divider
+                        // splits them in the sidebar.
+                        if i > 0 && targets[i - 1].key.is_pinned() && !target.key.is_pinned() {
+                            sub = sub.separator();
+                        }
+                        let mut item =
+                            PopupMenuItem::new(target.name.clone()).checked(target.checked);
+                        if !target.checked {
                             let app = app.clone();
-                            move |_, _window, cx| {
-                                let _ = app
-                                    .update(cx, |this, cx| this.set_tab_group(index, Some(id), cx));
-                            }
-                        }),
-                );
-            }
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click({
-                let app = app.clone();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| this.new_tab_group(index, window, cx));
-                }
-            }));
+                            let key = target.key.clone();
+                            item = item.on_click(move |_, _window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    this.move_tab_to(index, key.clone(), cx)
+                                });
+                            });
+                        }
+                        sub = sub.item(item);
+                    }
+                    if !targets.is_empty() {
+                        sub = sub.separator();
+                    }
+                    let remove = app.clone();
+                    let new = app.clone();
+                    sub.item(
+                        PopupMenuItem::new(t(L10nKey::SidebarRemoveFromGroup))
+                            .disabled(!in_kept_group)
+                            .on_click(move |_, _window, cx| {
+                                let _ = remove
+                                    .update(cx, |this, cx| this.set_tab_group(index, None, cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(
+                            move |_, window, cx| {
+                                let _ = new
+                                    .update(cx, |this, cx| this.new_tab_group(index, window, cx));
+                            },
+                        ),
+                    )
+                },
+            );
         }
+        // Read again: the submenu above needed `cx` mutably.
+        let this = entity.read(cx);
 
         let in_repo = this.tab_is_in_repo(index, window, cx);
         if in_repo {

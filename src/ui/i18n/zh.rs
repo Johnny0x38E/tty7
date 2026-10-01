@@ -2061,6 +2061,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarUngroupedGroup => "未分组",
         L10nKey::SidebarMoveToGroup => "移到分组",
         L10nKey::SidebarNewGroup => "新建分组…",
+        L10nKey::SidebarRemoveFromGroup => "移出分组",
         L10nKey::SidebarNewGroupName => "新建分组",
         L10nKey::SidebarRenameGroup => "重命名分组",
         L10nKey::SidebarPinGroup => "固定分组",
