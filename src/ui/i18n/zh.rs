@@ -664,6 +664,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyModeNever => "从不",
         L10nKey::NotifyModeUnfocused => "窗口未聚焦时",
         L10nKey::NotifyModeAlways => "总是",
+        L10nKey::ProgramNotesDropped => "此窗格的其他通知未显示",
         L10nKey::SettingsStartupNormal => "普通",
         L10nKey::SettingsStartupMaximized => "最大化",
         L10nKey::SettingsStartupFullscreen => "全屏",

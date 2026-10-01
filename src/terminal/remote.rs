@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 
 use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 use crate::core::config::CursorStyle as ConfigCursorStyle;
-use crate::core::osc::{OscTokenizer, TitleEffect, TitleLifetime};
+use crate::core::osc::{Note, NoteBudget, OscTokenizer, TitleEffect, TitleLifetime};
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
     LoopbackForward, LoopbackForwardRequest, ManagedForward, NativeSshSpec, PaneProcs,
@@ -108,6 +108,7 @@ struct ReaderSignals {
     /// which places/deletes them as `DaemonMsg::Image`/`DeleteImage` frames land.
     images: crate::terminal::images::ImageStore,
     clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
+    osc_notes: OscNotes,
     clipboard_write_busy: Arc<AtomicBool>,
     lease: Arc<Mutex<Option<String>>>,
     /// Whether this pane's pty is one a conhost renders into, and so whether
@@ -626,6 +627,10 @@ pub struct RemoteTerminal {
     /// anchors are relative to, so the store lives here rather than in the daemon.
     images: crate::terminal::images::ImageStore,
     clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
+    osc_notes: OscNotes,
+    /// On the pane rather than its view so it survives a relink; only the
+    /// view's poll touches it.
+    note_budget: Mutex<NoteBudget>,
     clipboard_write_busy: Arc<AtomicBool>,
     /// Who runs this pane at their own size — a phone, by the name it paired
     /// under — while the daemon says so. See [`Self::take_back`].
@@ -971,6 +976,7 @@ impl RemoteTerminal {
                 phase: self.ssh_phase.clone(),
                 images: self.images.clone(),
                 clipboard_writes: self.clipboard_writes.clone(),
+                osc_notes: self.osc_notes.clone(),
                 clipboard_write_busy: self.clipboard_write_busy.clone(),
                 lease: self.lease.clone(),
                 // Deliberately the pane's existing answer rather than one
@@ -1075,6 +1081,7 @@ impl RemoteTerminal {
         let ssh_phase: Arc<Mutex<Option<SshPhase>>> = Arc::new(Mutex::new(None));
         let images = crate::terminal::images::ImageStore::new();
         let clipboard_writes = Arc::new(Mutex::new(VecDeque::new()));
+        let osc_notes = OscNotes::default();
         let clipboard_write_busy = Arc::new(AtomicBool::new(false));
         let lease = Arc::new(Mutex::new(None));
 
@@ -1103,6 +1110,7 @@ impl RemoteTerminal {
                 phase: ssh_phase.clone(),
                 images: images.clone(),
                 clipboard_writes: clipboard_writes.clone(),
+                osc_notes: osc_notes.clone(),
                 clipboard_write_busy: clipboard_write_busy.clone(),
                 lease: lease.clone(),
                 local_conpty: local_conpty.clone(),
@@ -1143,6 +1151,8 @@ impl RemoteTerminal {
             agent_session,
             images,
             clipboard_writes,
+            osc_notes,
+            note_budget: Mutex::default(),
             clipboard_write_busy,
             lease,
             route: PaneRoute::Local,
@@ -1220,6 +1230,7 @@ impl RemoteTerminal {
                     phase,
                     images,
                     clipboard_writes,
+                    osc_notes,
                     clipboard_write_busy,
                     lease,
                     local_conpty,
@@ -1366,10 +1377,8 @@ impl RemoteTerminal {
                                         tr_adv_t += t0.elapsed() - waited;
                                     }
                                 }
-                                let mut notes = Vec::new();
-                                osc.feed(&out_batch, &mut notes);
-                                for (title, body) in notes {
-                                    notify_desktop(title.as_deref(), &body);
+                                if let Ok(mut notes) = osc_notes.lock() {
+                                    osc.feed(&out_batch, &mut *notes);
                                 }
                                 mode_tok.feed(&out_batch, |payload| {
                                     if let Some(mode) = payload.strip_prefix(b"133;V;") {
@@ -2047,6 +2056,30 @@ impl RemoteTerminal {
     /// and deletes images as out-of-band frames arrive from the daemon.
     pub fn images(&self) -> crate::terminal::images::ImageStore {
         self.images.clone()
+    }
+
+    /// Desktop notifications the program wrote (OSC 9, 99, 777), oldest
+    /// first; the view decides whether each is shown.
+    pub fn take_osc_notes(&self) -> Vec<Note> {
+        self.osc_notes
+            .lock()
+            .map(|mut notes| notes.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// Of `notes` about to be shown, the ones this pane's [`NoteBudget`] lets
+    /// through, and whether notes it dropped earlier are due to be said.
+    pub fn pace_osc_notes(
+        &self,
+        mut notes: Vec<Note>,
+        now: std::time::Instant,
+    ) -> (Vec<Note>, bool) {
+        let Ok(mut budget) = self.note_budget.lock() else {
+            return (notes, false);
+        };
+        let (show, dropped) = budget.admit(now, notes.len());
+        notes.truncate(show);
+        (notes, dropped)
     }
 
     pub fn pop_clipboard_write(&self) -> Option<tty7_core::core::clipboard::ClipboardWrite> {
@@ -3246,33 +3279,48 @@ mod notification_tests {
     }
 }
 
+type OscNotes = Arc<Mutex<VecDeque<Note>>>;
+
+/// Notes queued for a view that has not polled: a burst keeps only its
+/// newest few, so it shows as a few rather than a spray.
+const MAX_OSC_NOTES: usize = 3;
+
 struct OscNotifyScanner {
     tok: OscTokenizer,
+    notes: crate::core::osc::Notifications,
 }
 
 impl Default for OscNotifyScanner {
     fn default() -> Self {
         Self {
-            tok: OscTokenizer::new(&[b"9", b"777"]),
+            tok: OscTokenizer::new(&[b"9", b"99", b"777"]),
+            notes: Default::default(),
         }
     }
 }
 
 impl OscNotifyScanner {
-    fn feed(&mut self, bytes: &[u8], out: &mut Vec<(Option<String>, String)>) {
+    fn feed(&mut self, bytes: &[u8], out: &mut VecDeque<Note>) {
+        let notes = &mut self.notes;
         self.tok.feed(bytes, |payload| {
-            if let Some(note) = parse_osc_notification(payload) {
-                out.push(note);
+            if let Some(note) = parse_osc_notification(notes, payload) {
+                if out.len() >= MAX_OSC_NOTES {
+                    out.pop_front();
+                }
+                out.push_back(note);
             }
         });
     }
 }
 
-fn parse_osc_notification(payload: &[u8]) -> Option<(Option<String>, String)> {
+fn parse_osc_notification(
+    notes: &mut crate::core::osc::Notifications,
+    payload: &[u8],
+) -> Option<Note> {
     if crate::core::cli_agent::parse_agent_event(payload).is_some() {
         return None;
     }
-    let (title, body) = crate::core::osc::parse_notification(payload)?;
+    let (title, body) = notes.parse(payload)?;
     if title.as_deref() == Some(crate::core::cli_agent::AGENT_EVENT_SENTINEL) {
         return None;
     }
@@ -7142,15 +7190,52 @@ mod tests {
 
 #[cfg(test)]
 mod osc_tests {
-    use super::{OscNotifyScanner, parse_osc_notification};
+    use super::{MAX_OSC_NOTES, Note, OscNotifyScanner, VecDeque, parse_osc_notification};
 
-    fn scan(chunks: &[&[u8]]) -> Vec<(Option<String>, String)> {
+    fn scan(chunks: &[&[u8]]) -> Vec<Note> {
         let mut s = OscNotifyScanner::default();
-        let mut out = Vec::new();
+        let mut out = VecDeque::new();
         for c in chunks {
             s.feed(c, &mut out);
         }
-        out
+        out.into()
+    }
+
+    /// A burst of notifications shows only its newest few, once.
+    #[test]
+    fn a_burst_of_notes_is_handed_over_as_its_newest_few() {
+        use crate::daemon::protocol::DaemonMsg;
+        use crate::terminal::size::TermSize;
+
+        crate::core::config::pin_test_config_dir();
+        let (client, mut daemon) = crate::terminal::view::test_stream_pair();
+        let term = super::RemoteTerminal::from_stream(client, TermSize::new(80, 24)).unwrap();
+        let burst: Vec<u8> = (0..40)
+            .flat_map(|n| format!("\x1b]9;note {n}\x07").into_bytes())
+            .collect();
+        DaemonMsg::Output(burst).encode(&mut daemon).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let taken = loop {
+            let batch = term.take_osc_notes();
+            if !batch.is_empty() || std::time::Instant::now() > deadline {
+                break batch;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let bodies: Vec<_> = taken.into_iter().map(|(_, body)| body).collect();
+        assert_eq!(bodies, ["note 37", "note 38", "note 39"]);
+        assert!(term.take_osc_notes().is_empty(), "the rest were dropped");
+    }
+
+    #[test]
+    fn an_unread_queue_keeps_only_the_newest_notes() {
+        let chunks: Vec<Vec<u8>> = (0..MAX_OSC_NOTES + 2)
+            .map(|n| format!("\x1b]9;note {n}\x07").into_bytes())
+            .collect();
+        let got = scan(&chunks.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        assert_eq!(got.len(), MAX_OSC_NOTES);
+        assert_eq!(got[0], (None, "note 2".to_string()));
     }
 
     #[test]
@@ -7202,16 +7287,35 @@ mod osc_tests {
     }
 
     #[test]
+    fn claude_codes_kitty_and_ghostty_channels() {
+        assert_eq!(
+            scan(&[
+                b"\x1b]99;i=3:d=0:p=title;Claude Code\x07\x1b]99;i=3:p=body;Done\x07",
+                b"\x1b]99;i=3:d=1:a=focus;\x07",
+            ]),
+            vec![(Some("Claude Code".to_string()), "Done".to_string())]
+        );
+        assert_eq!(
+            scan(&[b"\x1b]777;notify;Claude Code;Done\x07"]),
+            vec![(Some("Claude Code".to_string()), "Done".to_string())]
+        );
+    }
+
+    #[test]
     fn conemu_osc9_subcommands_are_not_notifications() {
         assert_eq!(scan(&[b"\x1b]9;4;1;50\x07"]), vec![]);
         assert_eq!(scan(&[b"\x1b]9;9;/home/u\x07"]), vec![]);
+        assert_eq!(scan(&[b"\x1b]9;12\x07"]), vec![], "a prompt mark");
+        assert_eq!(scan(&[b"\x1b]9;11;a comment\x07"]), vec![]);
+        assert_eq!(scan(&[b"\x1b]9;42\x07"]), vec![(None, "42".to_string())]);
     }
 
     #[test]
     fn parse_rejects_empty_and_unrelated() {
-        assert_eq!(parse_osc_notification(b"9;"), None);
-        assert_eq!(parse_osc_notification(b"777;notify;"), None);
-        assert_eq!(parse_osc_notification(b"8;;https://example.com"), None);
+        let n = &mut Default::default();
+        assert_eq!(parse_osc_notification(n, b"9;"), None);
+        assert_eq!(parse_osc_notification(n, b"777;notify;"), None);
+        assert_eq!(parse_osc_notification(n, b"8;;https://example.com"), None);
     }
 
     #[test]

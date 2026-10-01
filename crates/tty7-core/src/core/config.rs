@@ -640,6 +640,18 @@ pub enum NotifyMode {
     Always,
 }
 
+impl NotifyMode {
+    /// Whether a notification goes out, given whether the reader is already
+    /// watching what it is about.
+    pub fn allows(self, watched: bool) -> bool {
+        match self {
+            NotifyMode::Never => false,
+            NotifyMode::Unfocused => !watched,
+            NotifyMode::Always => true,
+        }
+    }
+}
+
 /// Which release feed this installation follows.
 ///
 /// The channel is a property of the installation, not something derived from
@@ -1735,6 +1747,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_mode_holds_back_only_what_is_watched_under_unfocused() {
+        for watched in [false, true] {
+            assert!(!NotifyMode::Never.allows(watched));
+            assert!(NotifyMode::Always.allows(watched));
+            assert_eq!(NotifyMode::Unfocused.allows(watched), !watched);
+        }
+    }
 
     #[test]
     fn a_shell_without_a_program_is_the_login_shell_not_a_broken_file() {

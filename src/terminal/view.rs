@@ -30,7 +30,7 @@ use crate::core::actions::{
     OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
     SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
-use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
+use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -825,6 +825,59 @@ impl TerminalView {
     fn notify_pane(&self, lead: Option<&str>, body: &str, cx: &mut Context<Self>) {
         let title = self.notification_title(lead, cx);
         super::remote::notify_desktop_for_pane(Some(&title), body, Some(cx.entity_id()));
+    }
+
+    /// Desktop notifications the program wrote (OSC 9, 99, 777), such as
+    /// Claude Code's with its Notifications setting on `ghostty`, `kitty` or
+    /// `iterm2`. The agent's Waiting mark on the tab is the daemon's doing.
+    ///
+    /// `Unfocused` holds a note back only while the reader is looking at this
+    /// very pane. A pane whose agent reports through tty7's hooks already gets
+    /// its Waiting and Done notices from `poll_agent_status` whenever
+    /// `hooks_notify`, so the program's own copy would be a duplicate there.
+    ///
+    /// At most a few per pane every few seconds reach the desktop (pane output
+    /// is untrusted), with one note saying the rest were not shown.
+    fn show_program_notes(&self, hooks_notify: bool, window: &Window, cx: &mut Context<Self>) {
+        let notes = self.terminal.take_osc_notes();
+        let watched = window.is_window_active() && self.focus_handle.is_focused(window);
+        let hooked = self.terminal.agent_session().is_some_and(|s| s.rich);
+        let show = cx
+            .global::<Config>()
+            .notify_on_command_finish
+            .allows(watched)
+            && !(hooked && hooks_notify);
+        if !notes.is_empty() {
+            log::debug!(
+                "{} program notification(s) {}",
+                notes.len(),
+                if show { "shown" } else { "held back" }
+            );
+        }
+        // Asked on every poll, so the rest are said once a flood stops too,
+        // and while notes are held back, so a stale count never surfaces
+        // minutes later.
+        let (notes, dropped) = self.terminal.pace_osc_notes(
+            if show { notes } else { Vec::new() },
+            std::time::Instant::now(),
+        );
+        if !show {
+            return;
+        }
+        let agent = self.terminal.foreground_agent().map(|a| a.display_name());
+        if dropped {
+            self.notify_pane(agent, t(L10nKey::ProgramNotesDropped), cx);
+        }
+        for (title, body) in notes {
+            match title {
+                Some(title) => super::remote::notify_desktop_for_pane(
+                    Some(&title),
+                    &body,
+                    Some(cx.entity_id()),
+                ),
+                None => self.notify_pane(agent, &body, cx),
+            }
+        }
     }
 
     fn notification_title(&self, lead: Option<&str>, cx: &App) -> String {
@@ -3966,6 +4019,13 @@ impl TerminalView {
     }
 
     fn poll_foreground(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let notify_allowed = cx
+            .global::<Config>()
+            .notify_on_command_finish
+            .allows(window.is_window_active());
+        // Ahead of the exit check: what a program said just before its shell
+        // exited is still shown.
+        self.show_program_notes(notify_allowed, window, cx);
         if self.terminal.exited {
             return;
         }
@@ -3995,12 +4055,6 @@ impl TerminalView {
             self.last_at_prompt = at_prompt;
             cx.notify();
         }
-
-        let notify_allowed = match cx.global::<Config>().notify_on_command_finish {
-            NotifyMode::Never => false,
-            NotifyMode::Unfocused => !window.is_window_active(),
-            NotifyMode::Always => true,
-        };
 
         let running = !at_prompt;
         if running && self.running_agent.is_none() {

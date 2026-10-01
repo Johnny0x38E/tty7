@@ -655,6 +655,7 @@ l10n_keys! {
     NotifyModeNever,
     NotifyModeUnfocused,
     NotifyModeAlways,
+    ProgramNotesDropped,
     SettingsStartupNormal,
     SettingsStartupMaximized,
     SettingsStartupFullscreen,

@@ -765,6 +765,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::NotifyModeNever => "Never",
         L10nKey::NotifyModeUnfocused => "When unfocused",
         L10nKey::NotifyModeAlways => "Always",
+        L10nKey::ProgramNotesDropped => "More notifications from this pane weren't shown",
         L10nKey::SettingsStartupNormal => "Normal",
         L10nKey::SettingsStartupMaximized => "Maximized",
         L10nKey::SettingsStartupFullscreen => "Fullscreen",

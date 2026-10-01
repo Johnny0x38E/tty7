@@ -81,6 +81,14 @@ Two, both following your **Settings → General → Notifications** policy:
 Which means that by default — *When unfocused* — you are told the instant you
 are the bottleneck, and left alone while you are watching.
 
+A program can also post its own notification with OSC 9, OSC 777
+(`notify;title;body`) or kitty's OSC 99. tty7 shows it under the same policy,
+held back only while you are looking at that pane, and a click reveals the
+pane. Claude Code writes one when its **Notifications** setting (`/config`) is
+`ghostty`, `kitty` or `iterm2`. Its default, `auto`, sends nothing in tty7. A
+pane whose agent already reports through tty7's hooks skips the copy that would
+repeat the notice above.
+
 ## The tray icon
 
 tty7 keeps a status item in the system tray (menu bar on macOS). It flips to an
