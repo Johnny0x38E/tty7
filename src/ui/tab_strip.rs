@@ -1507,7 +1507,7 @@ impl Tty7App {
                     // destroys the element holding the focus — and a keymap
                     // scoped to a focused thing goes quiet with it, leaving the
                     // ⌘J that would undo this doing nothing. Hand the terminal
-                    // back what it lost, the same way the tab tiles below do.
+                    // back what it lost.
                     .on_click(cx.listener(|this, _, window, cx| {
                         let closing = this.right_panel_open(cx);
                         this.toggle_right_panel(cx);
@@ -1520,9 +1520,8 @@ impl Tty7App {
     }
 
     /// The right panel's tabs: words, the current one in body ink and medium
-    /// weight — v5's inspector row. Four names fit the panel's resting width
-    /// once Search folded into Files; this is secondary navigation, not an
-    /// action, so it gets neither a pill nor a bar.
+    /// weight on a pill (ink and weight alone read as no selection at all).
+    /// Four names fit the panel's resting width once Search folded into Files.
     pub(crate) fn right_panel_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let active_tab = self.right_panel_tab;
         let body_ink = cx.theme().foreground;
@@ -1553,6 +1552,9 @@ impl Tty7App {
                         div()
                             .flex_shrink_0()
                             .px(px(TAB_INNER_PAD))
+                            .py_0p5()
+                            .rounded_md()
+                            .when(current, |s| s.bg(cx.theme().secondary))
                             .text_size(gpui::rems(crate::ui::right_panel::TAB_TEXT))
                             .font_weight(match current {
                                 true => FontWeight::MEDIUM,
@@ -1562,24 +1564,11 @@ impl Tty7App {
                             .hover(move |s| s.text_color(body_ink))
                             .child(t(label_key)),
                     )
-                    // Another tab switches to it; the current one puts the panel
-                    // away, the way an activity bar behaves everywhere else.
-                    // (These only exist while the panel is open, so
-                    // `ToggleRightPanel` and the chrome tile beside them are still
-                    // what brings it back.)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        match this.right_panel_open(cx) && this.right_panel_tab == tab {
-                            true => {
-                                this.toggle_right_panel(cx);
-                                // These tabs live inside the panel, so closing
-                                // from one destroys the element that holds the
-                                // focus and leaves it nowhere — and a keymap whose
-                                // bindings are scoped to a focused thing goes
-                                // quiet with it. Hand the terminal back what it
-                                // lost.
-                                this.focus_active(window, cx);
-                            }
-                            false => this.set_right_panel_tab(tab, cx),
+                    // The current one does nothing: only ⌘J and the title-bar
+                    // panel tile put the panel away.
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.right_panel_tab != tab {
+                            this.set_right_panel_tab(tab, cx);
                         }
                     }))
                     .into_any_element()
