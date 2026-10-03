@@ -2230,7 +2230,7 @@ mod tests {
     #[test]
     fn the_overwrite_question_counts_correctly_in_every_locale() {
         use crate::ui::i18n::{L10nKey, t_plural};
-        for locale in ["en", "zh-CN", "ja-JP"] {
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
             crate::ui::i18n::set_locale(locale);
             for n in [1usize, 2, 7] {
                 let body = t_plural(L10nKey::SftpReplaceBody, n, &[("names", "a.txt")]);

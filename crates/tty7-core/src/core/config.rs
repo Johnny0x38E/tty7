@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-pub const SUPPORTED_GUI_LANGUAGES: &[&str] = &["en", "zh-CN", "ja-JP"];
+pub const SUPPORTED_GUI_LANGUAGES: &[&str] = &["en", "zh-CN", "ja-JP", "ru-RU"];
 
 #[derive(Default, Clone, Eq, PartialEq, Hash)]
 pub struct FontFeatures(pub Arc<Vec<(String, u32)>>);
@@ -319,7 +319,7 @@ pub struct Config {
     /// package manager's copy — and do not want it shadowed.
     #[serde(default = "default_true")]
     pub install_cli_on_path: bool,
-    /// GUI-only locale selection. Values: `en` or `zh-CN`.
+    /// GUI-only locale selection. See `SUPPORTED_GUI_LANGUAGES`.
     /// CLI output stays English so agent/script integrations are stable.
     #[serde(default = "default_gui_language")]
     pub gui_language: String,
@@ -2520,6 +2520,9 @@ mod tests {
 
         let cfg: Config = serde_json::from_str(r#"{"gui_language": "ja-JP"}"#).unwrap();
         assert_eq!(cfg.gui_language, "ja-JP");
+
+        let cfg: Config = serde_json::from_str(r#"{"gui_language": "ru-RU"}"#).unwrap();
+        assert_eq!(cfg.gui_language, "ru-RU");
 
         let mut cfg: Config = serde_json::from_str(r#"{"gui_language": "ko"}"#).unwrap();
         cfg.sanitize();

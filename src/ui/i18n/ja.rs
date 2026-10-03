@@ -327,6 +327,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsLanguageRussian => "Русский",
         L10nKey::SettingsSearchLanguageKeywords => {
             "言語 ロケール 英語 中国語 language locale english chinese"
         }

@@ -283,6 +283,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsLanguageRussian => "Русский",
         L10nKey::SettingsSearchLanguageKeywords => {
             "语言 区域设置 英文 中文 language locale english chinese"
         }
