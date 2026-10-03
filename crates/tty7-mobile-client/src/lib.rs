@@ -9,7 +9,7 @@ use std::str::FromStr as _;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
+use iroh::endpoint::{Connection, QuicTransportConfig, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,7 @@ pub async fn bind(secret: SecretKey) -> Result<Endpoint> {
         .advertise(false);
     match Endpoint::builder(presets::N0)
         .secret_key(secret.clone())
+        .transport_config(transport())
         .address_lookup(mdns)
         .bind()
         .await
@@ -73,10 +74,23 @@ pub async fn bind(secret: SecretKey) -> Result<Endpoint> {
         Ok(endpoint) => Ok(endpoint),
         Err(_) => Endpoint::builder(presets::N0)
             .secret_key(secret)
+            .transport_config(transport())
             .bind()
             .await
             .context("could not start the connection"),
     }
+}
+
+/// How long a machine may go unheard before its connection counts as gone.
+/// Keep-alives go every few seconds, so this is a few of them missed: a
+/// laptop that went to sleep shows as unreachable within seconds, not after
+/// half a minute of the app saying the link is fine.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(12);
+
+fn transport() -> QuicTransportConfig {
+    QuicTransportConfig::builder()
+        .max_idle_timeout(IDLE_TIMEOUT.try_into().ok())
+        .build()
 }
 
 /// Trades a pairing code for a [`Host`] the app can store and dial later.
@@ -207,6 +221,31 @@ impl Session {
             .ok_or_else(|| anyhow!("the machine did not say which tab it opened"))?
             .msg::<TabCreated>()?;
         Ok(created)
+    }
+}
+
+impl Session {
+    /// Closes a tab on `machine`, its panes with it.
+    pub async fn close_tab(
+        &self,
+        machine: Option<&str>,
+        workspace_id: &str,
+        tab_id: &str,
+    ) -> Result<()> {
+        let ask = Open::CloseTab {
+            workspace_id: workspace_id.to_string(),
+            tab_id: tab_id.to_string(),
+            machine: machine.map(str::to_string),
+        };
+        let (mut send, _) = open(&self.conn, &ask).await.map_err(|e| {
+            if e.to_string().contains("without answering") {
+                anyhow!("tty7 on this computer is too old to close tabs — update it")
+            } else {
+                e
+            }
+        })?;
+        let _ = send.finish();
+        Ok(())
     }
 }
 

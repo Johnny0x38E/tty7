@@ -37,15 +37,20 @@ tauri-plugin-opener = "2"
 tauri-plugin-barcode-scanner = "2"
 # Face ID / passcode before the app shows anything, when turned on.
 tauri-plugin-biometric = "2"
+# A tap felt under the finger for the keys and answers, as the phone's own
+# keyboard gives.
+tauri-plugin-haptics = "2"
 
 # Reading the system bars' size and leaving for the background (`insets`,
 # `to_background`), which the Tauri API does not reach.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 
-# Setting one WKWebView property the Tauri API does not reach (`edge_to_edge`).
+# What the Tauri API does not reach: the WKWebView's insets (`edge_to_edge`),
+# the keyboard's height and the bar WebKit puts over it (`keyboard`).
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
+block2 = "0.6"
 
 # The Android library ships as built: stripping takes it from 30 MB to 20, and
 # the APK from 32 to 23. iOS strips at export either way.

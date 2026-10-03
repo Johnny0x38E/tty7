@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tty7_core::client::{ControlClient, PaneClient, PaneInput, PaneOutput};
-use tty7_core::core::machine::Machine;
+use tty7_core::core::machine::{Machine, TabId};
 use tty7_core::daemon::control::{
     ControlHello, ControlRequest, PaneAgentState, PaneSeed, ReplyOk, RouteInfo, WorkspaceId,
 };
@@ -257,21 +257,37 @@ impl Backend for Daemon {
                 format!("no workspace {workspace_id}"),
             )
         })?;
+        let for_phone = size.is_some();
         let size = size.map_or(NEW_TAB_SIZE, |s| WinSize {
             cols: s.cols.clamp(20, 500),
             rows: s.rows.clamp(5, 300),
             ..NEW_TAB_SIZE
         });
         let owner = workspace.to_string();
-        let session = self.panes_on(machine)?.spawn(
-            cwd.as_deref().map(PathBuf::from),
-            size,
-            None,
-            Some(owner.clone()),
-            Some(owner),
-        )?;
+        // A tab asked for with nowhere in mind starts at home, as a new
+        // window's does — not in whatever directory the server started in.
+        // A remote's own server knows its home; this one only knows this.
+        let start = match (cwd.as_deref(), machine) {
+            (Some(dir), _) => Some(PathBuf::from(dir)),
+            (None, None) => std::env::home_dir(),
+            (None, Some(_)) => None,
+        };
+        let session =
+            self.panes_on(machine)?
+                .spawn(start, size, None, Some(owner.clone()), Some(owner))?;
         let pane = session.pane_id();
         session.detach()?;
+        // The tab is about to reach the desktop, which lays every tab out at
+        // its window's size; the shell's first screen — a banner, a prompt —
+        // would be drawn that wide and then squeezed onto the phone. Held
+        // at the phone's size from before the desktop hears of it, until
+        // the phone's own view of it takes over.
+        if for_phone {
+            match self.observe(machine, pane) {
+                Ok(feed) => hold_for_phone(feed, size),
+                Err(e) => log::debug!("mobile gateway: holding new pane {pane}: {e}"),
+            }
+        }
         let seed = PaneSeed {
             pane,
             cwd,
@@ -292,6 +308,52 @@ impl Backend for Daemon {
             }),
             other => Err(unexpected("TabCreate", &other)),
         }
+    }
+
+    fn running_panes(&self) -> Option<std::collections::HashSet<u64>> {
+        let panes = PaneClient::local().list().ok()?;
+        Some(
+            panes
+                .into_iter()
+                .filter(|p| p.alive)
+                .map(|p| p.pane_id)
+                .collect(),
+        )
+    }
+
+    /// As the desktop closes a tab: onto the workspace's recently-closed
+    /// list, its panes stopped with their screens kept, so it can be put
+    /// back. A machine that keeps no such list closes it for good, and its
+    /// panes are ended from here, as `tty7 tab close` does.
+    fn close_tab(&self, machine: Option<&str>, workspace_id: &str, tab_id: &str) -> io::Result<()> {
+        let invalid =
+            |what: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("no {what}"));
+        let workspace: WorkspaceId = workspace_id
+            .parse()
+            .map_err(|_| invalid(&format!("workspace {workspace_id}")))?;
+        // A tab id is a UUID on the wire; it has no `FromStr` of its own.
+        let tab: TabId = serde_json::from_value(serde_json::Value::String(tab_id.to_string()))
+            .map_err(|_| invalid(&format!("tab {tab_id}")))?;
+        let remembered = ControlRequest::TabCloseRemembered {
+            workspace,
+            tab,
+            panes: Vec::new(),
+        };
+        let ended = match self.request_on(machine, remembered) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                match self.request_on(machine, ControlRequest::TabClose { workspace, tab })? {
+                    ReplyOk::Panes(panes) => panes,
+                    other => return Err(unexpected("TabClose", &other)),
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        let panes = self.panes_on(machine)?;
+        for pane in ended {
+            panes.kill(pane)?;
+        }
+        Ok(())
     }
 }
 
@@ -320,6 +382,38 @@ impl PaneFeed for Observed {
             Err(e) => Err(e),
         }
     }
+}
+
+/// How long a new tab is held at the phone's size for the phone to open it.
+const PHONE_HOLD: Duration = Duration::from_secs(10);
+
+/// Takes the pane at `size` over `feed` and keeps it so on a thread of its
+/// own, until the phone's stream takes the lease from it (the daemon tells
+/// the one displaced), the pane ends, or [`PHONE_HOLD`] passes.
+fn hold_for_phone(mut feed: Box<dyn PaneFeed>, size: WinSize) {
+    let Some(mut leases) = feed.leases() else {
+        return;
+    };
+    let take = LeaseRequest::Take {
+        size,
+        by: "a phone".to_string(),
+    };
+    if leases.send(take).is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let until = std::time::Instant::now() + PHONE_HOLD;
+        let mut held = false;
+        while std::time::Instant::now() < until {
+            match feed.recv(Duration::from_millis(250)) {
+                Ok(Some(DaemonMsg::Lease(Some(_)))) => held = true,
+                Ok(Some(DaemonMsg::Lease(None))) if held => return,
+                Ok(Some(DaemonMsg::Exited { .. })) | Err(_) => return,
+                _ => {}
+            }
+        }
+        drop(leases);
+    });
 }
 
 /// The observer connection's writing half, for leases.

@@ -16,6 +16,38 @@
   font-display: block;
 }
 
+/* The icons a prompt draws (Powerline arrows, a branch, a folder): Nerd
+   Fonts' symbols alone, one cell wide, for the code points Hack lacks. A
+   phone has no fonts of its own to fall back on. */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("./assets/fonts/SymbolsNerdFontMono.woff2") format("woff2");
+  font-display: block;
+}
+
+/* What agents and TUIs draw their marks with — Claude Code's ⏺ and ⎿, ✔,
+   ⚠, braille spinners — which the phone's own fonts leave as empty boxes
+   in a canvas. Noto's symbols, cut down to those blocks. */
+@font-face {
+  font-family: "Noto Sans Symbols";
+  src: url("./assets/fonts/NotoSansSymbols-subset.woff2") format("woff2");
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Noto Sans Symbols 2";
+  src: url("./assets/fonts/NotoSansSymbols2-subset.woff2") format("woff2");
+  font-display: block;
+}
+
+/* The few of those that are emoji by default (⏰ ✅ ❌ ✨), in outline, as
+   text: a canvas leaves them as boxes rather than reach for colour ones. */
+@font-face {
+  font-family: "Noto Emoji";
+  src: url("./assets/fonts/NotoEmoji-subset.woff2") format("woff2");
+  font-display: block;
+}
+
 :root {
   --canvas: #f3f3f1;
   --cell: #fcfcfb;
@@ -34,6 +66,8 @@
   --accent-ink: #fcfcfb;
   --tint: var(--fill);
   --danger: #c43c43;
+  /* A filled control's red: the system's own. */
+  --danger-fill: #ff3b30;
   --warn-ink: #b7791f;
   --ok-ink: #248a3d;
   --term: var(--cell);
@@ -50,7 +84,7 @@
   --done: #22c55e;
 
   --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", Roboto, "Segoe UI", system-ui, sans-serif;
-  --mono: Hack, "SF Mono", Menlo, ui-monospace, monospace;
+  --mono: Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", "SF Mono", "PingFang SC", "Hiragino Sans", "Apple SD Gothic Neo", Menlo, ui-monospace, monospace;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* The home indicator's gap; none while the keyboard is up, which covers
@@ -90,6 +124,7 @@
   --line: rgb(255 255 255 / 0.16);
   --accent-ink: #18181a;
   --danger: #f07878;
+  --danger-fill: #ff453a;
   --warn-ink: #e0a345;
   --ok-ink: #5fd07a;
   --bar: rgb(30 30 32 / 0.82);
@@ -252,6 +287,12 @@ code {
   transform: none;
 }
 
+/* Until it folds in, the title takes no room, so the way back is named in
+   full; once it shows, the back pill gives way to it. */
+.nav:not(.folded) .nav-title {
+  max-width: 0;
+}
+
 /* Back is a floating pill that names where it goes. */
 .nav-back {
   display: flex;
@@ -276,6 +317,18 @@ code {
 .nav-back .icon {
   width: 20px;
   height: 20px;
+}
+
+/* Once the title shows, the pill would be cut to "Machin…" beside it: it
+   gives way to the round chevron alone, as the system's own bar does. */
+.nav.folded .nav-back {
+  width: 38px;
+  padding: 0;
+  justify-content: center;
+}
+
+.nav.folded .nav-back span:last-child {
+  display: none;
 }
 
 .nav-back:active,
@@ -644,7 +697,10 @@ code {
   opacity: 0.55;
 }
 
-.row + .row::before {
+.row + .row::before,
+.swipe + .swipe > .row::before,
+.swipe + .row::before,
+.row + .swipe > .row::before {
   content: "";
   position: absolute;
   top: 0;
@@ -947,7 +1003,7 @@ code {
 }
 
 .button.danger {
-  background: var(--danger);
+  background: var(--danger-fill);
   color: #fff;
 }
 
@@ -1422,6 +1478,11 @@ html.scanning #app {
   color: var(--ink-2);
 }
 
+.term-copy-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .term-copy-text {
   flex: 1;
   min-height: 0;
@@ -1431,10 +1492,9 @@ html.scanning #app {
   overscroll-behavior: contain;
   font: 12.5px/1.45 var(--mono);
   color: var(--ink);
-  /* Wrapped to the phone, not the desktop's width, so nothing needs panning
-     to select. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  /* Laid out as the pane has it: rewrapping to the phone breaks every
+     table, column and indented block into a jumble. A wide line pans. */
+  white-space: pre;
   -webkit-user-select: text;
   user-select: text;
   -webkit-touch-callout: default;
@@ -1471,6 +1531,16 @@ html.scanning #app {
 
 /* The dock under the terminal: a row of keys a page at a time, then the
    message box and the keyboard. */
+.term-screen.finding .term-dock {
+  display: none;
+}
+
+/* Room above the first row for the find bar, so a match there can be
+   scrolled out from under it. */
+.term-screen.finding .term .xterm {
+  margin-top: 60px;
+}
+
 .term-dock {
   flex: none;
   display: flex;
@@ -1626,7 +1696,26 @@ html.scanning #app {
   bottom: calc(12px + var(--safe-bottom));
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
+}
+
+.search-clear {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: -4px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--ink-3, #8e8e93);
+  color: var(--canvas);
+}
+
+.search .search-clear .icon {
+  width: 12px;
+  height: 12px;
 }
 
 /* The list softens into the canvas as it runs under the floating bar, as the
@@ -2258,6 +2347,25 @@ html[data-nav="pop"]::view-transition-new(root) {
   gap: 10px;
 }
 
+/* Each block keeps its height; the sheet scrolls rather than squeezing a
+   file to nothing under a long list of untracked ones. */
+.diff-body > * {
+  flex-shrink: 0;
+}
+
+.diff-body > .group {
+  margin: 10px 0 0;
+}
+
+.diff-body .row {
+  min-height: 0;
+  padding: 9px 14px;
+}
+
+.diff-body .row-title {
+  font-size: 13px;
+}
+
 .diff-root {
   margin: 0 4px;
   font: 13px var(--mono);
@@ -2337,4 +2445,395 @@ html[data-nav="pop"]::view-transition-new(root) {
   margin-top: 4px;
   color: var(--ink-2);
   background: var(--fill);
+}
+
+/* A row that slides to show an action behind it. */
+.swipe {
+  position: relative;
+  overflow: hidden;
+  transition:
+    max-height 0.25s var(--ease),
+    opacity 0.2s;
+  max-height: 160px;
+}
+
+.swipe > .row {
+  background: var(--cell);
+  transition: transform 0.25s var(--ease);
+}
+
+.swipe.dragging > .row {
+  transition: none;
+}
+
+.swipe-action {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 88px;
+  border: 0;
+  background: var(--danger-fill);
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.swipe.gone {
+  max-height: 0;
+  opacity: 0;
+}
+
+/* A phone on its side has height to spare for nothing but the pane: the bar
+   slims, and the keys and the message box share one row. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .term-nav {
+    height: calc(44px + var(--inset-top));
+  }
+
+  .term-dock {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding-top: 6px;
+    padding-bottom: calc(6px + var(--safe-bottom));
+  }
+
+  .term-dock > .key-slot {
+    flex: 1.3;
+    min-width: 0;
+  }
+
+  .term-dock > .compose {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .term-dock > .key-dots {
+    display: none;
+  }
+
+  .key {
+    height: 38px;
+  }
+
+  .compose-input {
+    min-height: 38px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+}
+
+/* A hint is one line; it never makes the box taller than what is typed. */
+.compose-input::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A control's mark, named in running text. */
+.inline-icon {
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
+}
+
+/* Another agent on the machine wants a look: a card that drops over the
+   top of the pane, tapped to go there. */
+.peek-slot {
+  position: absolute;
+  z-index: 6;
+  top: 8px;
+  right: max(10px, var(--inset-right));
+  left: max(10px, var(--inset-left));
+  pointer-events: none;
+}
+
+.peek {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 22px;
+  background: var(--bar);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  pointer-events: auto;
+  animation: peek-in 0.32s var(--ease);
+}
+
+.peek-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.peek-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.peek-sub {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+@keyframes peek-in {
+  from {
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+}
+
+/* The way back down from the history (main.ts `latest`). */
+.to-latest {
+  position: absolute;
+  right: max(14px, var(--inset-right));
+  bottom: 12px;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 22px;
+  display: grid;
+  place-items: center;
+  background: var(--raised);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.to-latest[hidden] {
+  display: none;
+}
+
+.to-latest .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.to-latest:active {
+  background: var(--cell-press);
+}
+
+/* Files waiting to go with the message (main.ts `attached`). */
+.attach-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.attach-chips[hidden] {
+  display: none;
+}
+
+.attach-chip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  height: 44px;
+  padding: 4px 4px 4px 4px;
+  border-radius: 12px;
+  background: var(--cell);
+  box-shadow: 0 0 0 0.5px var(--hair);
+}
+
+.attach-thumb {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  background: var(--fill);
+  color: var(--ink-2);
+}
+
+.attach-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.attach-drop {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.attach-drop .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* A row's held-down menu (main.ts `rowActions`). */
+.row .row-title.danger,
+.row .row-icon.danger {
+  color: var(--danger);
+}
+
+.row .row-icon {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  color: var(--ink-2);
+}
+
+.row {
+  -webkit-touch-callout: none;
+}
+
+/* Three dots while a pane's screen is on its way (main.ts `loading`). */
+.term-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.term-loading[hidden] {
+  display: none;
+}
+
+.term-loading span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  animation: loading-dot 1s ease-in-out infinite;
+}
+
+.term-loading span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.term-loading span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes loading-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* A pane that is not running: its keys and box are there but out of use. */
+.term-screen.ended .key-slot,
+.term-screen.ended .compose > button {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.peek-close {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 15px;
+  display: grid;
+  place-items: center;
+  background: var(--fill);
+  color: var(--ink-2);
+}
+
+.peek-close .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* Another agent is waiting: a dot on the way back to the list. */
+.term-back {
+  position: relative;
+}
+
+.term-back.attention::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--waiting);
+  box-shadow: 0 0 0 2px var(--canvas);
+}
+
+/* A row's name gives way before its tags do: "Current" stays whole. */
+.row-title.tagged {
+  display: flex;
+  align-items: center;
+}
+
+.row-title.tagged .row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-title.tagged .tag {
+  flex: none;
+}
+
+.peek.leaving {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+}
+
+.term-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+}
+
+/* The round bar buttons are drawn at 38pt but answer a 44pt square, the
+   least a finger should have to hit. */
+.round,
+.nav-icon,
+.nav-back {
+  position: relative;
+}
+
+.round::before,
+.nav-icon::before,
+.nav-back::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
 }

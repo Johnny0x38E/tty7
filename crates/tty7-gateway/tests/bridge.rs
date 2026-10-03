@@ -152,6 +152,19 @@ impl Backend for FakeMachine {
             pane_id: 2,
         })
     }
+
+    fn close_tab(
+        &self,
+        _machine: Option<&str>,
+        workspace_id: &str,
+        tab_id: &str,
+    ) -> io::Result<()> {
+        let ws = &self.machine.workspaces[0];
+        if workspace_id != ws.id.to_string() || ws.tabs.iter().all(|t| t.id.to_string() != tab_id) {
+            return Err(io::Error::other(format!("no tab {tab_id}")));
+        }
+        Ok(())
+    }
 }
 
 struct FakeFeed {
@@ -205,6 +218,15 @@ impl PaneFeed for FakeFeed {
             Err(e) => Err(io::Error::other(e)),
         }
     }
+}
+
+/// A fresh drawing of a pane's screen (`mirror::Mirror::draw`), as text.
+fn drawing(item: Option<PaneItem>) -> String {
+    let Some(PaneItem::Output(bytes)) = item else {
+        panic!("expected the screen drawn, got {item:?}");
+    };
+    assert!(bytes.starts_with(b"\x1bc"), "a drawing starts from a reset");
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 struct Rig {
@@ -322,10 +344,8 @@ async fn a_paired_phone_reads_the_tree_and_drives_a_pane() {
             rows: 30
         }))
     );
-    assert_eq!(
-        within(screen.next()).await.unwrap(),
-        Some(PaneItem::Output(b"$ ".to_vec()))
-    );
+    // The screen comes drawn afresh, as the desktop's emulator reads it.
+    assert!(drawing(within(screen.next()).await.unwrap()).contains("$"));
     keys.input(b"ls\r").await.unwrap();
     assert_eq!(
         within(screen.next()).await.unwrap(),
@@ -351,7 +371,7 @@ async fn typing_that_fails_is_reported_not_dropped() {
     let session = within(rig.paired()).await;
     let (mut keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
     within(screen.next()).await.unwrap(); // size
-    within(screen.next()).await.unwrap(); // prompt
+    within(screen.next()).await.unwrap(); // the screen, drawn
 
     keys.input(b"refuse").await.unwrap();
     let Some(PaneItem::Event(PaneEvent::Error { message })) = within(screen.next()).await.unwrap()
@@ -377,7 +397,7 @@ async fn a_phone_takes_a_pane_over_at_its_size_and_gives_it_back() {
     let session = within(rig.paired()).await;
     let (mut keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
     within(screen.next()).await.unwrap(); // size
-    within(screen.next()).await.unwrap(); // prompt
+    within(screen.next()).await.unwrap(); // the screen, drawn
 
     let size = GridSize { cols: 44, rows: 31 };
     keys.request(&PaneRequest::TakeOver { size }).await.unwrap();
@@ -385,6 +405,8 @@ async fn a_phone_takes_a_pane_over_at_its_size_and_gives_it_back() {
         within(screen.next()).await.unwrap(),
         Some(PaneItem::Event(PaneEvent::Size { cols: 44, rows: 31 }))
     );
+    // Redrawn at the new size rather than left to the phone to reflow.
+    assert!(drawing(within(screen.next()).await.unwrap()).contains("$"));
     assert_eq!(
         within(screen.next()).await.unwrap(),
         Some(PaneItem::Event(PaneEvent::Lease {
@@ -414,7 +436,7 @@ async fn a_take_over_the_pane_cannot_do_is_refused_and_the_pane_stays_up() {
     let session = within(rig.paired()).await;
     let (mut keys, mut screen) = within(session.pane(Some("old"), 1)).await.unwrap();
     within(screen.next()).await.unwrap(); // size
-    within(screen.next()).await.unwrap(); // prompt
+    within(screen.next()).await.unwrap(); // the screen, drawn
 
     let size = GridSize { cols: 44, rows: 31 };
     keys.request(&PaneRequest::TakeOver { size }).await.unwrap();
@@ -451,7 +473,7 @@ async fn a_revoked_phone_is_cut_off_at_its_next_stream() {
 async fn a_paired_phone_opens_a_tab() {
     let rig = Rig::new().await;
     let session = within(rig.paired()).await;
-    let (_, mut tree) = within(session.control()).await.unwrap().split();
+    let (_asks, mut tree) = within(session.control()).await.unwrap().split();
     let Some(ControlEvent::Tree(first)) = within(tree.next()).await.unwrap() else {
         panic!("expected a tree first");
     };
@@ -485,6 +507,24 @@ async fn a_paired_phone_opens_a_tab() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("no workspace nope"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_phone_closes_a_tab() {
+    let rig = Rig::new().await;
+    let session = within(rig.paired()).await;
+    let (_asks, mut tree) = within(session.control()).await.unwrap().split();
+    let Some(ControlEvent::Tree(first)) = within(tree.next()).await.unwrap() else {
+        panic!("expected a tree first");
+    };
+    let ws = &first.workspaces[0];
+    within(session.close_tab(None, &ws.id, &ws.tabs[0].id))
+        .await
+        .unwrap();
+    let err = within(session.close_tab(None, &ws.id, "nope"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no tab nope"), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -543,12 +583,19 @@ async fn a_paired_phone_reads_a_working_trees_changes() {
     run(&["commit", "-qm", "first"]);
     std::fs::write(repo.join("src/a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
+    std::fs::create_dir_all(repo.join("made/deep")).unwrap();
+    std::fs::write(repo.join("made/deep/x.txt"), "x\n").unwrap();
+    std::fs::write(repo.join("made/y.txt"), "y\n").unwrap();
 
     // Asked from a directory inside the repository, as a pane's cwd often is.
     let cwd = repo.join("src").to_string_lossy().into_owned();
     let diff = within(session.diff(None, &cwd)).await.unwrap();
     assert!(diff.patch.contains("+two"), "{}", diff.patch);
-    assert_eq!(diff.untracked, vec!["new.txt".to_string()]);
+    // A new directory comes as itself, not as each file in it.
+    assert_eq!(
+        diff.untracked,
+        vec!["made/".to_string(), "new.txt".to_string()]
+    );
     assert!(!diff.truncated);
 
     let err = within(session.diff(None, &std::env::temp_dir().to_string_lossy()))
@@ -584,7 +631,7 @@ async fn an_unpaired_phone_cannot_open_a_tab() {
 async fn linked_machines_come_with_the_tree_and_their_panes_open() {
     let rig = Rig::new().await;
     let session = within(rig.paired()).await;
-    let (_, mut tree) = within(session.control()).await.unwrap().split();
+    let (_asks, mut tree) = within(session.control()).await.unwrap().split();
     let Some(ControlEvent::Tree(tree)) = within(tree.next()).await.unwrap() else {
         panic!("expected a tree first");
     };
@@ -597,15 +644,13 @@ async fn linked_machines_come_with_the_tree_and_their_panes_open() {
     assert_eq!(up.workspaces[0].name, "pale-otter");
     assert_eq!((down.connected, down.workspaces.len()), (false, 0));
 
-    let (_, mut screen) = within(session.pane(Some(&up.key), 1)).await.unwrap();
-    assert!(matches!(
-        within(screen.next()).await.unwrap(),
-        Some(PaneItem::Event(PaneEvent::Size { .. }))
-    ));
-    assert_eq!(
-        within(screen.next()).await.unwrap(),
-        Some(PaneItem::Output(b"me@build-box:22$ ".to_vec()))
+    let (_keys, mut screen) = within(session.pane(Some(&up.key), 1)).await.unwrap();
+    let first = within(screen.next()).await.unwrap();
+    assert!(
+        matches!(first, Some(PaneItem::Event(PaneEvent::Size { .. }))),
+        "{first:?}"
     );
+    assert!(drawing(within(screen.next()).await.unwrap()).contains("me@build-box:22$"));
 
     let err = within(session.pane(Some(&down.key), 1))
         .await

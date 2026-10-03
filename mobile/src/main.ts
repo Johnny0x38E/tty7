@@ -10,6 +10,8 @@ import type { ITheme } from "@xterm/xterm";
 import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
+import { impactFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -34,17 +36,20 @@ const android = /Android/.test(navigator.userAgent);
 
 // The keyboard. The WebView runs edge to edge and is never resized for it
 // (lib.rs `edge_to_edge`): the keyboard simply covers the bottom of the page.
-// What is left is the visual viewport, so the app is sized to that, and the
-// dock and the message box sit on top of the keyboard. Screens that lay out
-// by size hear it as a window resize. Android's WebView leaves the visual
-// viewport whole, so the keyboard's height comes from the app (MainActivity).
+// What is left is sized to by the app, so the dock and the message box sit on
+// top of the keyboard. Screens that lay out by size hear it as a window
+// resize. Neither phone's WebView says reliably how much the keyboard covers
+// — iOS's leaves the visual viewport whole when edge to edge, Android's
+// always — so the app's native side says it (lib.rs `keyboard`, MainActivity)
+// as the keyboard starts to move; the visual viewport stands in until it has.
 {
   const view = window.visualViewport;
   let last = 0;
-  let androidKeyboard = 0;
+  // The native side's word: how far down the page the keyboard leaves room.
+  let room: (() => number) | null = null;
   const fitView = () => {
     if (!view) return;
-    const height = Math.round(android ? window.innerHeight - androidKeyboard : view.height);
+    const height = Math.round(room ? Math.min(room(), window.innerHeight) : view.height);
     // iOS scrolls the page to show a focused field; the app does its own.
     if (window.scrollY) window.scrollTo(0, 0);
     if (height === last) return;
@@ -58,8 +63,10 @@ const android = /Android/.test(navigator.userAgent);
   };
   view?.addEventListener("resize", fitView);
   view?.addEventListener("scroll", fitView);
-  window.addEventListener("android-keyboard", (e) => {
-    androidKeyboard = (e as CustomEvent<number>).detail;
+  // iOS says where the keyboard's top edge lands, Android how tall it is.
+  window.addEventListener("native-keyboard", (e) => {
+    const { top, height } = (e as CustomEvent<{ top?: number; height?: number }>).detail;
+    room = top !== undefined ? () => top : () => window.innerHeight - (height ?? 0);
     fitView();
   });
 }
@@ -111,6 +118,23 @@ function sentence(text: string) {
   const t = text.trim();
   if (!t) return "";
   return `${t[0].toUpperCase()}${t.slice(1)}${/[.!?]$/.test(t) ? "" : "."}`;
+}
+
+/** A tap felt under the finger: `key` for a key or a button that types,
+ * `tick` for a control passing a point (a swipe opening, a toggle). */
+function feel(kind: "key" | "tick") {
+  (kind === "key" ? impactFeedback("light") : selectionFeedback()).catch(() => {});
+}
+
+/** Why a machine could not be reached, in words, for under a title that
+ * already names it: the transport's own phrasing is for logs. */
+function why(message: string, name: string) {
+  const cause = message.replace(new RegExp(`^could not reach ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `, "i"), "");
+  if (/refused to accept|connection refused|aborted by peer/i.test(cause))
+    return "It turned the connection away — tty7 there may be restarting.";
+  if (/timed? ?out|no route|unreachable|network is down/i.test(cause)) return "It didn't answer.";
+  if (/connection (was )?(lost|closed)/i.test(cause)) return "The connection dropped.";
+  return sentence(cause);
 }
 
 function errorText(e: unknown) {
@@ -197,6 +221,15 @@ function keepSent(text: string) {
 
 /** Past messages for what is being written: those it begins, then those
  * that contain it. */
+function wordStarts(text: string, q: string) {
+  // Chinese and Japanese leave no spaces between words: anywhere will do.
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(q)) return text.includes(q);
+  for (let at = text.indexOf(q); at >= 0; at = text.indexOf(q, at + 1)) {
+    if (at === 0 || !/[\p{L}\p{N}]/u.test(text[at - 1])) return true;
+  }
+  return false;
+}
+
 function suggestions(typed: string, limit = 12) {
   const q = typed.trim().toLowerCase();
   if (!q) return [];
@@ -206,7 +239,9 @@ function suggestions(typed: string, limit = 12) {
     const low = past.toLowerCase();
     if (low === q) continue;
     if (low.startsWith(q)) starts.push(past);
-    else if (low.includes(q)) within.push(past);
+    // Elsewhere only where a word starts: "ls" finds "git ls-files", not
+    // every message that mentions tools.
+    else if (wordStarts(low, q)) within.push(past);
   }
   return [...starts, ...within].slice(0, limit);
 }
@@ -220,11 +255,22 @@ function suggestions(typed: string, limit = 12) {
 let onResume: (() => void) | null = null;
 let onLeave: (() => void) | null = null;
 
+// Locked, the app is covered as it goes, so the picture the phone keeps for
+// its app switcher shows nothing of the panes.
+let shade: HTMLElement | null = null;
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
+    shade?.remove();
+    shade = null;
     if (prefs.lock && Date.now() - hiddenAt > LOCK_AFTER_MS) lock();
     onResume?.();
-  } else hiddenAt = Date.now();
+  } else {
+    hiddenAt = Date.now();
+    if (prefs.lock && !shade) {
+      shade = h("div", { class: "lock-cover" }, h("img", { class: "empty-mark", src: logoUrl, alt: "" }));
+      document.body.append(shade);
+    }
+  }
 });
 
 // The app lock: a cover over everything until Face ID or the passcode says
@@ -342,6 +388,22 @@ document.addEventListener(
 );
 document.addEventListener("touchcancel", () => (edgeSwipe = null), { capture: true, passive: true });
 
+// A tap on nothing in particular puts the keyboard away, as it does in the
+// phone's own apps: there is no Done bar over it (lib.rs `keyboard`). Taps
+// on controls keep it — the key row and Send write into the focused field —
+// and a pane decides for itself (`terminalScreen`).
+document.addEventListener(
+  "pointerdown",
+  (e) => {
+    const field = document.activeElement;
+    if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) return;
+    const target = e.target as Element;
+    if (target.closest?.("button, input, textarea, select, label, a, .term")) return;
+    field.blur();
+  },
+  { capture: true, passive: true },
+);
+
 // Android's Back button and gesture. Left to the WebView, they would leave the
 // app, since it has no history. Back closes what is open over the screen
 // first, then goes back a screen, and from the first one puts the app away.
@@ -433,14 +495,24 @@ function floatingBar(placeholder: string, onSearch: (query: string) => void, add
     ariaLabel: placeholder,
   });
   field.setAttribute("autocorrect", "off");
-  field.oninput = () => onSearch(field.value.trim().toLowerCase());
+  const clear = h("button", { class: "search-clear", ariaLabel: "Clear", hidden: true }, ico("close"));
+  const changed = () => {
+    clear.hidden = !field.value;
+    onSearch(field.value.trim().toLowerCase());
+  };
+  field.oninput = changed;
   field.onkeydown = (e) => {
     if (e.key === "Enter") field.blur();
+  };
+  clear.onpointerdown = (e) => e.preventDefault();
+  clear.onclick = () => {
+    field.value = "";
+    changed();
   };
   return h(
     "div",
     { class: "float-bar" },
-    h("label", { class: "search" }, ico("search"), field),
+    h("label", { class: "search" }, ico("search"), field, clear),
     h("button", { class: "fab", ariaLabel: add.label, onclick: add.run }, ico("plus")),
   );
 }
@@ -460,11 +532,16 @@ function section(title: Child, ...rows: Child[]) {
 /** What the last visit to each machine saw: its link and how many tabs it
  * had. The list shows it rather than holding a stream open per machine. */
 const seen = new Map<string, { link: LinkInfo | null; tabs: number | null }>();
+/** Each machine's tree as last reported, drawn while a new watch comes up. */
+const trees = new Map<string, Tree>();
 
 function hostMeta(hostId: string): { tone: string; text: string } | null {
   const last = seen.get(hostId);
   if (!last) return null;
-  const tabs = last.tabs === null ? "" : ` · ${last.tabs} ${last.tabs === 1 ? "tab" : "tabs"}`;
+  const waiting = trees.has(hostId) ? waitingCount(trees.get(hostId)!) : 0;
+  const tabs =
+    (last.tabs === null ? "" : ` · ${last.tabs} ${last.tabs === 1 ? "tab" : "tabs"}`) +
+    (waiting ? ` · ${waiting} waiting` : "");
   if (last.link === null) return { tone: "offline", text: "Offline" };
   if (last.link.path === "connecting") return { tone: "connecting", text: `Connecting…${tabs}` };
   const path = last.link.path === "direct" ? "Direct" : "Relay";
@@ -472,6 +549,7 @@ function hostMeta(hostId: string): { tone: string; text: string } | null {
 }
 
 function hostsScreen(direction: "push" | "pop" = "pop") {
+  remember("last.host", "");
   go(direction, () => {
     const body = h("div", { class: "stack" });
     let all: Host[] = [];
@@ -508,7 +586,7 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
             h(
               "p",
               { class: "empty-body" },
-              "Reach the panes open in tty7 on your computer, and type into them from here.",
+              "Reach the panes open in tty7 on your computer, and type into them from here. In tty7, open Settings → Mobile and point this phone's camera at the code.",
             ),
             h("button", { class: "button primary", onclick: () => pairScreen() }, "Pair a machine"),
           ),
@@ -516,6 +594,8 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
         return;
       }
       dock.hidden = false;
+      // A few machines are found by eye; the search comes with more.
+      dock.querySelector<HTMLElement>(".search")!.hidden = hosts.length < 6;
       render();
     });
     return view;
@@ -565,7 +645,7 @@ function settingsScreen() {
           o.value === chosen ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
         ),
       );
-    const note = (group: HTMLElement, text: string) => (group.append(h("p", { class: "group-note" }, text)), group);
+    const note = (group: HTMLElement, ...text: Child[]) => (group.append(h("p", { class: "group-note" }, ...text)), group);
 
     const lockSetting = () =>
       note(
@@ -577,13 +657,14 @@ function settingsScreen() {
               class: "row choice",
               onclick: async () => {
                 // Turning it on proves it works first, so no one locks
-                // themselves out.
-                if (!prefs.lock) {
-                  try {
-                    await authenticate("Turn on the tty7 lock", { allowDeviceCredential: true });
-                  } catch {
-                    return;
-                  }
+                // themselves out; turning it off takes the owner too, not
+                // whoever holds the phone.
+                try {
+                  await authenticate(prefs.lock ? "Turn off the tty7 lock" : "Turn on the tty7 lock", {
+                    allowDeviceCredential: true,
+                  });
+                } catch {
+                  return;
                 }
                 setPref("lock", !prefs.lock);
                 draw();
@@ -603,7 +684,9 @@ function settingsScreen() {
         h("span", { class: saved ? "row-title danger" : "row-title" }, "Clear message history"),
         h("span", { class: "row-meta" }, saved ? `${saved} saved` : "Empty"),
       );
-      clear.onclick = () => {
+      clear.onclick = async () => {
+        if (!(await confirmSheet("Clear message history?", `The ${saved} messages kept on this phone go for good.`, "Clear")))
+          return;
         remember("history", "[]");
         draw();
       };
@@ -622,7 +705,10 @@ function settingsScreen() {
         ),
         note(
           section("Panes wider than the phone", ...choices(WIDE, prefs.wide, (v) => setPref("wide", v))),
-          "How such a pane first shows. Switch any time from its ⋯ menu.",
+          "How such a pane first shows. Switch any time from its ",
+          // The menu's own mark: the phone's fonts have no ⋯ of their own.
+          ico("more", "icon inline-icon"),
+          " menu.",
         ),
         note(
           section(
@@ -850,7 +936,9 @@ async function scanCode(): Promise<string | null> {
   }
 }
 
-function pairScreen() {
+/** `linked`, when given, is a pairing code that arrived as a link: it is
+ * filled in and paired straight away, as a scanned one is. */
+function pairScreen(linked?: string) {
   go("push", () => {
     const code = h("textarea", {
       class: "field-input code",
@@ -860,6 +948,9 @@ function pairScreen() {
       spellcheck: false,
       ariaLabel: "Pairing code",
     });
+    // A code, not words: no suggestions over the keyboard, no "fixing" it.
+    code.setAttribute("autocorrect", "off");
+    code.setAttribute("autocomplete", "off");
     const name = h("input", {
       class: "field-input",
       value: guessDeviceName(),
@@ -911,6 +1002,11 @@ function pairScreen() {
 
     code.oninput = sync;
     sync();
+    if (linked) {
+      code.value = linked;
+      sync();
+      queueMicrotask(() => submit.click());
+    }
 
     submit.onclick = async () => {
       submit.disabled = true;
@@ -920,7 +1016,14 @@ function pairScreen() {
         const host = await api.pair(code.value.trim(), name.value.trim() || "phone");
         hostScreen(host, "push");
       } catch (e) {
-        error.textContent = errorText(e);
+        const text = errorText(e);
+        error.textContent = /not a tty7 pairing code/i.test(text)
+          ? "That isn't a pairing code. On your computer, open Settings → Mobile and click Show code."
+          : /used up or expired/i.test(text)
+            ? "That code has expired or was already used. Make a new one with New code on your computer."
+            : /^could not reach /i.test(text)
+              ? `${why(text, text.replace(/^could not reach ([^:]+):.*$/i, "$1"))} Check that tty7 is running there with phone access on.`
+              : sentence(text);
         submit.classList.remove("busy");
         submit.textContent = "Pair";
         submit.disabled = false;
@@ -957,7 +1060,9 @@ function pairScreen() {
               {},
               "Click ",
               h("strong", {}, "Show code"),
-              canScan ? ", then scan it here, or copy the code and paste it below." : ", copy the code and paste it below.",
+              canScan
+                ? ", then point this phone's Camera at it, or scan it here, or paste the code below."
+                : ", copy the code and paste it below.",
             ),
           ),
         ),
@@ -1029,6 +1134,7 @@ function retrier(run: () => void) {
 const SLOW_CONNECT_MS = 10_000;
 
 function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
+  remember("last.host", host.id);
   go(direction, () => {
     const link = h("p", { class: "link" });
     // Shown here and remembered for the machine list.
@@ -1041,10 +1147,12 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     const lastLink = () => seen.get(host.id)?.link ?? { path: "connecting" as const, rtt_ms: 0 };
     showLink(lastLink());
     const notice = h("div", { class: "notice-slot" });
-    const body = h("div", { class: "stack" }, skeleton());
+    const body = h("div", { class: "stack" });
 
     let alive = true;
-    let lastTree: Tree | null = null;
+    // Coming back, the tree last seen is drawn at once and brought up to
+    // date when the new watch reports, rather than a skeleton every time.
+    let lastTree: Tree | null = trees.get(host.id) ?? null;
     let slow: number | undefined;
     let query = "";
     // The one workspace on screen, kept per machine across visits.
@@ -1055,7 +1163,13 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
       draw();
     };
     const draw = () => {
-      if (lastTree) body.replaceChildren(...renderTree(host, lastTree, query, picked, pick));
+      if (lastTree)
+        body.replaceChildren(
+          ...renderTree(host, lastTree, query, picked, pick, (key) => {
+            picked = key;
+            remember(`workspace.${host.id}`, key);
+          }),
+        );
     };
     const dock = floatingBar("Search tabs", (q) => {
       query = q;
@@ -1081,6 +1195,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
             )
           ) {
             await api.forget(host.id);
+            trees.delete(host.id);
             hostsScreen();
           }
         },
@@ -1135,10 +1250,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
       notice.replaceChildren(
         noticeCard({
           title: `Can't reach ${host.name}`,
-          body: [
-            sentence(message),
-            ` Check that tty7 is running on ${host.name} with phone access on.`,
-          ],
+          body: [why(message, host.name), ` Check that tty7 is running on ${host.name} with phone access on.`],
           actions: [
             { label: "Try now", run: start },
             { label: "Pair again", run: () => pairScreen() },
@@ -1186,6 +1298,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
               if (!lastTree || dropped) notice.replaceChildren();
               dropped = false;
               lastTree = msg.tree;
+              trees.set(host.id, msg.tree);
               seen.set(host.id, { link: seen.get(host.id)?.link ?? null, tabs: tabCount(msg.tree) });
               draw();
               break;
@@ -1217,6 +1330,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     // behind: watching again covers both, since the gateway sends the whole
     // tree on every new watch.
     onResume = start;
+    if (lastTree) draw();
     start();
     return view;
   });
@@ -1255,6 +1369,15 @@ const STATUS_WORD: Record<AgentStatus, string> = {
  * to, or null for the paired machine itself. */
 type Place = { key: string; name: string } | null;
 
+/** Agents on a machine that are waiting for a reply. */
+function waitingCount(tree: Tree) {
+  const spaces = [...tree.workspaces, ...(tree.remotes ?? []).flatMap((r) => r.workspaces)];
+  return spaces.reduce(
+    (n, ws) => n + ws.tabs.reduce((m, tab) => m + tab.panes.filter((p) => p.agent?.status === "waiting").length, 0),
+    0,
+  );
+}
+
 function tabCount(tree: Tree) {
   const count = (list: WorkspaceView[]) => list.reduce((n, ws) => n + ws.tabs.length, 0);
   return count(tree.workspaces) + (tree.remotes ?? []).reduce((n, r) => n + count(r.workspaces), 0);
@@ -1287,6 +1410,7 @@ function renderTree(
   query: string,
   picked: string | null,
   pick: (key: string) => void,
+  keep: (key: string) => void,
 ): Node[] {
   if (query) {
     const groups = [
@@ -1336,6 +1460,9 @@ function renderTree(
     }),
   ];
   const on = spaces.find((sp) => sp.key === picked) ?? spaces[0];
+  // What is on screen stays on screen: a workspace the desktop opens or
+  // turns to later does not take its place under the reader's thumb.
+  if (on.key !== picked) keep(on.key);
 
   const out: Node[] = [];
   if (spaces.length > 1) {
@@ -1348,6 +1475,8 @@ function renderTree(
           { class: sp === on ? "ws-chip on" : "ws-chip", role: "tab", onclick: () => pick(sp.key) },
           sp.remote && ico("server"),
           h("span", { class: "ws-chip-name" }, sp.label),
+          // An agent waiting or at work in a workspace not on screen.
+          sp !== on && sp.ws && urgentDot(sp.ws.tabs),
           sp.count !== null && h("span", { class: "ws-chip-count" }, String(sp.count)),
         );
         chip.setAttribute("aria-selected", String(sp === on));
@@ -1420,7 +1549,7 @@ function workspaceGroup(
   searching = false,
 ) {
   const rowsOf = (tabs: TabView[]) =>
-    tabs.flatMap((tab) => tab.panes.map((pane) => paneRow(host, place, tab, pane, tab.id === ws.active_tab)));
+    tabs.flatMap((tab) => tab.panes.map((pane) => paneRow(host, place, ws, tab, pane, tab.id === ws.active_tab)));
   // The desktop sidebar's groups, each with the tabs still in it (a search
   // leaves some out). An older desktop sends none: one list, as before.
   const byId = new Map(ws.tabs.map((tab) => [tab.id, tab]));
@@ -1455,6 +1584,11 @@ function mostUrgent(tabs: TabView[]): AgentStatus | null {
   return order.find((s) => states.has(s)) ?? null;
 }
 
+function urgentDot(tabs: TabView[]) {
+  const urgent = mostUrgent(tabs.map((tab) => ({ ...tab, panes: tab.panes.filter((p) => !p.stopped) })));
+  return urgent && h("span", { class: `status-dot ${urgent}` });
+}
+
 /** One sidebar group: a header that folds it, over its rows. It starts folded
  * as the desktop has it; a fold here is this phone's own and is remembered,
  * and a search shows every match whatever is folded. */
@@ -1472,13 +1606,12 @@ function tabGroup(
   const key = `fold.${host.id}.${spaceKey(place, ws)}.${group.pinned ? "pin" : "auto"}.${group.name}`;
   const saved = remembered(key);
   let folded = !searching && (saved === null ? !!group.collapsed : saved === "1");
-  const urgent = mostUrgent(tabs);
   const head = h(
     "button",
     { class: "tgroup-head" },
     ico("chevron", "icon tgroup-chevron"),
     h("span", { class: "tgroup-name" }, group.name),
-    urgent && h("span", { class: `status-dot ${urgent}` }),
+    urgentDot(tabs),
     h("span", { class: "tgroup-count" }, String(tabs.length)),
   );
   const section = h("div", { class: "tgroup" }, head, card);
@@ -1518,9 +1651,9 @@ function remember(key: string, value: string) {
   }
 }
 
-/** The sheet "+" opens on a machine: pick what runs, pick the workspace, Open.
- * The tab starts in the directory its workspace's last tab is in, sized to
- * this screen, and the agent's command is typed into it once it is live. */
+/** The sheet "+" opens on a machine: pick what runs, where, Open. The tab is
+ * sized to this screen, and the agent's command is typed into it once it is
+ * live. */
 function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, picked: string | null) {
   type Target = { place: Place; ws: WorkspaceView };
   const targets: Target[] = [
@@ -1533,8 +1666,26 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
   // The workspace on screen, unless it cannot take a new tab.
   let target = Math.max(0, targets.findIndex((t) => spaceKey(t.place, t.ws) === picked));
 
+  // Where it starts: one of the folders the workspace has tabs in, the
+  // tab in front on the desktop first.
+  const foldersOf = (ws: WorkspaceView) => {
+    const tabs = [...ws.tabs].sort((a, b) => Number(b.id === ws.active_tab) - Number(a.id === ws.active_tab));
+    const used = [...new Set(tabs.flatMap((tab) => tab.panes.map((pane) => pane.cwd ?? "")).filter(Boolean))];
+    // Then home, where a shell starts when given nowhere: "" here, none sent.
+    return [...used, ""];
+  };
+  let folder = 0;
+
   const agents = h("div", { class: "agent-grid" });
   const places = h("div", { class: "card" });
+  const folders = h("div", { class: "card" });
+  const folderGroup = h("section", { class: "sheet-group" }, h("h3", { class: "group-title" }, "Folder"), folders);
+  const placeGroup = h(
+    "section",
+    { class: "sheet-group" },
+    h("h3", { class: "group-title" }, "Workspace"),
+    targets.length ? places : h("p", { class: "group-empty" }, `Open a workspace in tty7 on ${host.name} first.`),
+  );
   const open = h("button", { class: "button primary wide sheet-open" }, "Open");
   const error = h("p", { class: "field-error", role: "alert" });
 
@@ -1553,13 +1704,28 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
       ...targets.map((t, i) =>
         h(
           "button",
-          { class: "row choice", onclick: () => ((target = i), draw()) },
+          { class: "row choice", onclick: () => ((target = i), (folder = 0), draw()) },
           h("span", { class: "row-title" }, workspaceName(t.ws.name)),
           h("span", { class: "row-meta" }, t.place?.name ?? `${t.ws.tabs.length} ${t.ws.tabs.length === 1 ? "tab" : "tabs"}`),
           i === target ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
         ),
       ),
     );
+    const dirs = targets[target] ? foldersOf(targets[target].ws) : [];
+    folders.replaceChildren(
+      ...dirs.map((dir, i) =>
+        h(
+          "button",
+          { class: "row choice", onclick: () => ((folder = i), draw()) },
+          h("span", { class: "row-title" }, dir ? baseName(dir) : "Home"),
+          h("span", { class: "row-meta" }, dir ? parentPath(dir) : "~"),
+          i === folder ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
+        ),
+      ),
+    );
+    // Only a choice when there is one to make.
+    folderGroup.hidden = dirs.length < 2;
+    placeGroup.hidden = targets.length === 1;
     open.disabled = targets.length === 0;
   };
   draw();
@@ -1568,12 +1734,8 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
     "New tab",
     h("div", { class: "sheet-body" },
       h("section", { class: "sheet-group" }, h("h3", { class: "group-title" }, "Agent"), agents),
-      h(
-        "section",
-        { class: "sheet-group" },
-        h("h3", { class: "group-title" }, "Workspace"),
-        targets.length ? places : h("p", { class: "group-empty" }, `Open a workspace in tty7 on ${host.name} first.`),
-      ),
+      folderGroup,
+      placeGroup,
       error,
     ),
     open,
@@ -1584,12 +1746,14 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
     remember("newtab.agent", s.kind ?? "shell");
     open.disabled = true;
     error.textContent = "";
-    const cwd = ws.tabs.at(-1)?.panes[0]?.cwd ?? null;
+    const cwd = foldersOf(ws)[folder] || null;
     try {
       const created = await api.tabNew(host.id, place?.key ?? null, ws.id, cwd, phoneGrid());
       remove();
-      const title = s.kind ? agentLook(s.kind).name : "shell";
-      terminalScreen(host, place, { id: created.pane_id, title, cwd }, title, s.command ?? undefined);
+      // Named as the list will name it: by its agent, or by its folder.
+      const title = s.kind ? agentLook(s.kind).name : cwd ? baseName(cwd) : "Shell";
+      const tab = { workspace: ws.id, id: created.tab_id, name: title, busy: false };
+      terminalScreen(host, place, { id: created.pane_id, title, cwd }, title, tab, s.command ?? undefined, true);
     } catch (e) {
       error.textContent = sentence(errorText(e));
       failed(errorText(e));
@@ -1617,6 +1781,48 @@ function openSheet(title: string, ...content: Child[]) {
     scrim.classList.add("leaving");
     setTimeout(() => scrim.remove(), still.matches ? 0 : 220);
   };
+  // Pulled down, it goes, as the phone's own sheets do: from its top, or
+  // from anywhere while what it holds is scrolled to the start. Let go
+  // short of the way, it settles back.
+  let pull: { y: number; t: number; dy: number; claimed: boolean } | null = null;
+  sheet.addEventListener(
+    "touchstart",
+    (e) => {
+      const target = e.target as Element;
+      const scroller = target.closest?.(".sheet-body, .diff-code, input, textarea");
+      if (e.touches.length !== 1 || (scroller && scroller.scrollTop > 0) || target.closest?.("input, textarea")) return;
+      pull = { y: e.touches[0].clientY, t: e.timeStamp, dy: 0, claimed: false };
+    },
+    { passive: true },
+  );
+  sheet.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!pull) return;
+      const dy = e.touches[0].clientY - pull.y;
+      if (!pull.claimed) {
+        if (Math.abs(dy) < 8) return;
+        if (dy < 0) return void (pull = null);
+        pull.claimed = true;
+        sheet.style.transition = "none";
+      }
+      e.preventDefault();
+      pull.dy = Math.max(0, dy);
+      sheet.style.transform = `translateY(${pull.dy}px)`;
+    },
+    { passive: false },
+  );
+  sheet.addEventListener("touchend", (e) => {
+    const done = pull;
+    pull = null;
+    if (!done?.claimed) return;
+    const fast = done.dy / Math.max(1, e.timeStamp - done.t) > 0.5;
+    if (done.dy > Math.min(140, sheet.offsetHeight / 3) || fast) close();
+    else {
+      sheet.style.transition = "transform 0.25s var(--ease)";
+      sheet.style.transform = "";
+    }
+  });
   document.body.append(scrim);
   return { close, remove: () => scrim.remove() };
 }
@@ -1628,15 +1834,23 @@ function changesSheet(host: Host, place: Place, cwd: string) {
   openSheet("Changes", body);
   api.diff(host.id, place?.key ?? null, cwd).then(
     (d) => body.replaceChildren(...renderDiff(d)),
-    (e) => body.replaceChildren(h("p", { class: "group-empty" }, sentence(errorText(e)))),
+    (e) => {
+      const text = errorText(e);
+      // The usual case is no failure at all: a folder outside any repository.
+      const said = /not in a git repository/.test(text)
+        ? `${baseName(cwd)} is not in a Git repository, so there are no changes to show.`
+        : sentence(text);
+      body.replaceChildren(h("p", { class: "group-empty" }, said));
+    },
   );
 }
 
 function renderDiff(d: api.Diff): Node[] {
   const files = d.patch.split(/^(?=diff --git )/m).filter((f) => f.startsWith("diff --git "));
-  const out: Node[] = [
-    h("p", { class: "diff-root" }, shortPath(d.root), files.length || d.untracked.length ? "" : " · no changes"),
-  ];
+  const root = h("p", { class: "diff-root" }, shortPath(d.root), files.length || d.untracked.length ? "" : " · no changes");
+  const out: Node[] = [root];
+  let added = 0;
+  let removed = 0;
   for (const f of files) {
     const lines = f.split("\n");
     const name =
@@ -1653,10 +1867,15 @@ function renderDiff(d: api.Diff): Node[] {
       if (kind === "del") del++;
       code.append(h("div", { class: `diff-line ${kind}` }, line || " "));
     }
+    added += add;
+    removed += del;
     const binary = !inHunk && /^Binary files/m.test(f);
+    // What a tool wrote rather than a person starts folded: a lock file's
+    // hundreds of lines would bury the change that matters.
+    const generated = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|poetry\.lock|composer\.lock|go\.sum)$/.test(name);
     const block = h(
       "details",
-      { class: "diff-file", open: files.length <= 6 },
+      { class: "diff-file", open: files.length <= 6 && !generated },
       h(
         "summary",
         {},
@@ -1668,12 +1887,32 @@ function renderDiff(d: api.Diff): Node[] {
     );
     out.push(block);
   }
+  if (files.length)
+    root.append(
+      ` · ${files.length} ${files.length === 1 ? "file" : "files"} `,
+      h("span", { class: "diff-add" }, `+${added}`),
+      " ",
+      h("span", { class: "diff-del" }, `−${removed}`),
+    );
   if (d.truncated) out.push(h("p", { class: "group-empty" }, "Cut short: the rest is too long to show here."));
   if (d.untracked.length) {
     out.push(
       section(
         `Not tracked yet · ${d.untracked.length}`,
-        ...d.untracked.slice(0, 200).map((p) => h("div", { class: "row choice static" }, h("span", { class: "row-title diff-name" }, p))),
+        ...d.untracked.slice(0, 200).map((p) => {
+          // A name to read and where it is, as the folder lists say it; a
+          // new directory keeps its slash.
+          const dir = p.endsWith("/");
+          const parts = p.replace(/\/$/, "").split("/");
+          const leaf = parts.pop() + (dir ? "/" : "");
+          return h(
+            "div",
+            { class: "row choice static" },
+            h("span", { class: "row-title" }, leaf),
+            // The end of the folder is the part that tells them apart.
+            parts.length > 0 && h("span", { class: "row-meta" }, parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : parts.join("/")),
+          );
+        }),
       ),
     );
   }
@@ -1717,9 +1956,16 @@ function confirmSheet(title: string, text: string, action: string): Promise<bool
 function phoneGrid() {
   const cellW = readablePx() * CELL_EM;
   const cellH = readablePx() * 1.18;
-  // The terminal screen's bar, its dock (keys, page dots, message box, the
-  // home indicator's gap) and the xterm padding.
-  const chrome = 56 + 132 + 16;
+  // The terminal screen's bar under the status bar, its dock (keys, page
+  // dots, message box) over the home indicator, and the xterm padding. The
+  // two insets are the phone's own, read off the stylesheet's variables.
+  const probe = h("div");
+  probe.style.cssText = "position:absolute;visibility:hidden;padding:var(--inset-top) 0 var(--safe-bottom)";
+  document.body.append(probe);
+  const { paddingTop, paddingBottom } = getComputedStyle(probe);
+  const insets = (parseFloat(paddingTop) || 0) + (parseFloat(paddingBottom) || 0);
+  probe.remove();
+  const chrome = 44 + insets + 132 + 16;
   return {
     cols: Math.max(20, Math.floor((window.innerWidth - 12) / cellW)),
     rows: Math.max(5, Math.floor((window.innerHeight - chrome) / cellH)),
@@ -1733,23 +1979,149 @@ function workspaceName(name: string) {
 
 /** A pane's row: its tab's name first, as on the desktop, then what the pane
  * is doing — its agent's state, or where its shell is. */
-function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView, current = false) {
+/** A tab to close: where it is, what it is called, and whether an agent in
+ * it is at work, which closing would stop. */
+interface TabRef {
+  workspace: string;
+  id: string;
+  name: string;
+  busy: boolean;
+}
+
+function tabRef(ws: WorkspaceView, tab: TabView, name: string): TabRef {
+  const busy = tab.panes.some((p) => p.agent && (p.agent.status === "working" || p.agent.status === "waiting"));
+  return { workspace: ws.id, id: tab.id, name, busy };
+}
+
+/** Closes a tab, asking first when an agent in it is at work. False when it
+ * was not closed: declined, or refused, which `failed` is told. */
+async function closeTab(host: Host, place: Place, tab: TabRef, failed: (message: string) => void) {
+  if (
+    tab.busy &&
+    !(await confirmSheet(
+      `Close ${tab.name}?`,
+      "Its agent is still at work and stops with it. You can reopen the tab from tty7 on your computer.",
+      "Close tab",
+    ))
+  )
+    return false;
+  try {
+    await api.tabClose(host.id, place?.key ?? null, tab.workspace, tab.id);
+    return true;
+  } catch (e) {
+    failed(sentence(errorText(e)));
+    return false;
+  }
+}
+
+/** The row a swipe has opened, so opening another closes it. */
+let swiped: { close: () => void } | null = null;
+
+/** A row that slides left to show an action behind it, as a list on the
+ * phone does. A swipe far enough opens it; a tap anywhere then closes it. */
+function swipeable(row: HTMLElement, label: string, spoken: string, run: () => Promise<boolean>) {
+  const WIDTH = 88;
+  const action = h("button", { class: "swipe-action", ariaLabel: spoken }, label);
+  const wrap = h("div", { class: "swipe" }, action, row);
+  let at = 0;
+  let drag: { x: number; y: number; from: number; claimed: boolean } | null = null;
+  const move = (x: number) => {
+    at = x;
+    row.style.transform = x ? `translateX(${x}px)` : "";
+  };
+  const me = {
+    close: () => {
+      move(0);
+      if (swiped === me) swiped = null;
+    },
+  };
+  row.addEventListener(
+    "touchstart",
+    (e) => {
+      const t = e.touches[0];
+      drag = { x: t.clientX, y: t.clientY, from: at, claimed: false };
+    },
+    { passive: true },
+  );
+  row.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!drag) return;
+      const t = e.touches[0];
+      const dx = t.clientX - drag.x;
+      const dy = Math.abs(t.clientY - drag.y);
+      if (!drag.claimed) {
+        if (Math.max(Math.abs(dx), dy) < 8) return;
+        // Mostly sideways it is the row's; anything else scrolls the list.
+        if (dy >= Math.abs(dx)) return (drag = null);
+        drag.claimed = true;
+        wrap.classList.add("dragging");
+        if (swiped && swiped !== me) swiped.close();
+      }
+      e.preventDefault();
+      const x = drag.from + dx;
+      const was = at < -WIDTH / 2;
+      // Past the action's width it gives, but grudgingly.
+      move(Math.min(0, x < -WIDTH ? -WIDTH + (x + WIDTH) / 3 : x));
+      // Felt as it passes the point where letting go opens it.
+      if (was !== at < -WIDTH / 2) feel("tick");
+    },
+    { passive: false },
+  );
+  row.addEventListener("touchend", () => {
+    if (!drag?.claimed) return void (drag = null);
+    drag = null;
+    wrap.classList.remove("dragging");
+    if (at < -WIDTH / 2) {
+      move(-WIDTH);
+      swiped = me;
+    } else me.close();
+  });
+  // Open, a tap on the row closes it rather than opening the pane.
+  row.addEventListener(
+    "click",
+    (e) => {
+      if (at === 0) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      me.close();
+    },
+    { capture: true },
+  );
+  action.onclick = async () => {
+    action.disabled = true;
+    if (await run()) {
+      wrap.classList.add("gone");
+    } else {
+      action.disabled = false;
+      me.close();
+    }
+  };
+  return wrap;
+}
+
+function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane: PaneView, current = false) {
   const agent = pane.agent;
   const sub: Child[] = [];
-  if (agent && agent.status !== "idle")
+  // A pane that is not running has no agent at work, whatever it last said.
+  if (agent && agent.status !== "idle" && !pane.stopped)
     sub.push(h("span", { class: `status-word ${agent.status}` }, STATUS_WORD[agent.status]));
-  // A tab named after its directory says the cwd already; what tells its
-  // panes apart then is what runs in them.
+  // A tab named after its directory goes by the directory's own name, the
+  // end a narrow row would cut off. What tells a split's panes apart is
+  // what runs in them.
   const namedByPath = /^[~/]/.test(tab.name);
-  const split = tab.panes.length > 1 || namedByPath ? pane.title : null;
-  const dir = agent || namedByPath ? null : shortPath(pane.cwd);
+  const name = namedByPath ? baseName(tab.name) : tab.name;
+  const pathTitle = (t: string) => t === tab.name || t === pane.cwd || /^[~/]/.test(t);
+  const split = tab.panes.length > 1 && !pathTitle(pane.title) ? pane.title : null;
+  // Where it is, said the same way on every row, however the tab is named.
+  const dir = shortPath(pane.cwd ?? (namedByPath ? tab.name : null));
   const detail = [split, agent?.message ?? dir].filter(Boolean).join(" · ");
   if (detail) sub.push(sub.length ? ` · ${detail}` : detail);
-  return h(
+  const row = h(
     "button",
     {
-      class: tab.hibernated ? "row asleep" : "row",
-      onclick: () => terminalScreen(host, place, pane, tab.name),
+      class: tab.hibernated || pane.stopped ? "row asleep" : "row",
+      onclick: () => terminalScreen(host, place, pane, name, tabRef(ws, tab, name)),
     },
     avatar(agent),
     h(
@@ -1757,17 +2129,149 @@ function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView, current
       { class: "row-text" },
       h(
         "span",
-        { class: "row-title" },
-        tab.name,
+        { class: "row-title tagged" },
+        h("span", { class: "row-name" }, name),
         // The tab in front on the desktop: where you were.
         current && h("span", { class: "tag current" }, "Current"),
         tab.hibernated && h("span", { class: "tag" }, "Asleep"),
+        pane.stopped && h("span", { class: "tag" }, "Not running"),
       ),
       sub.length > 0 && h("span", { class: "row-sub" }, ...sub),
     ),
-    agent && agent.status !== "idle" && agent.status !== "done" && h("span", { class: `status-dot ${agent.status}` }),
+    agent && !pane.stopped && agent.status !== "idle" && agent.status !== "done" && h("span", { class: `status-dot ${agent.status}` }),
     ico("chevron", "icon row-chevron"),
   );
+  rowActions(row, () => {
+    const actions: { label: string; icon: keyof typeof icon; danger?: boolean; run: () => void }[] = [
+      { label: "Open", icon: "terminal", run: () => terminalScreen(host, place, pane, name, tabRef(ws, tab, name)) },
+      {
+        label: "Open at phone size",
+        icon: "phone",
+        run: () => {
+          remember(`take.${host.id}.${place?.key ?? ""}.${pane.id}`, "1");
+          terminalScreen(host, place, pane, name, tabRef(ws, tab, name));
+        },
+      },
+    ];
+    const cwd = pane.cwd;
+    if (cwd) {
+      actions.push(
+        { label: "Changes", icon: "compose", run: () => changesSheet(host, place, cwd) },
+        {
+          label: "New tab here",
+          icon: "plus",
+          run: async () => {
+            try {
+              const made = await api.tabNew(host.id, place?.key ?? null, ws.id, cwd, phoneGrid());
+              const title = baseName(cwd);
+              terminalScreen(host, place, { id: made.pane_id, title, cwd }, title, { workspace: ws.id, id: made.tab_id, name: title, busy: false }, undefined, true);
+            } catch (e) {
+              closeFailed(name, sentence(errorText(e)));
+            }
+          },
+        },
+        {
+          label: "Copy folder path",
+          icon: "copy",
+          run: () => void navigator.clipboard?.writeText(cwd).then(() => feel("tick"), () => {}),
+        },
+      );
+    }
+    actions.push({
+      label: "Close tab",
+      icon: "close",
+      danger: true,
+      run: () => void closeTab(host, place, tabRef(ws, tab, name), (message) => closeFailed(name, message)),
+    });
+    return { title: name, actions };
+  });
+  // A split tab's panes each have a row; closing is the tab's, on its first.
+  if (pane.id !== tab.panes[0]?.id) return row;
+  return swipeable(row, "Close", `Close ${name}`, () => closeTab(host, place, tabRef(ws, tab, name), (message) => closeFailed(name, message)));
+}
+
+/** Holding a row brings up what can be done with it, as a list's rows do
+ * on the phone; the tap the press would end in is swallowed. */
+function rowActions(
+  row: HTMLElement,
+  menu: () => { title: string; actions: { label: string; icon: keyof typeof icon; danger?: boolean; run: () => void }[] },
+) {
+  let timer = 0;
+  let start: { x: number; y: number } | null = null;
+  let held = false;
+  const cancel = () => {
+    clearTimeout(timer);
+    start = null;
+  };
+  row.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) return cancel();
+      held = false;
+      start = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      timer = window.setTimeout(() => {
+        start = null;
+        held = true;
+        feel("key");
+        const { title, actions } = menu();
+        const { remove } = openSheet(
+          title,
+          h(
+            "div",
+            { class: "sheet-body" },
+            h(
+              "div",
+              { class: "card" },
+              ...actions.map((a) =>
+                h(
+                  "button",
+                  {
+                    class: "row choice",
+                    onclick: () => {
+                      remove();
+                      a.run();
+                    },
+                  },
+                  h("span", { class: a.danger ? "row-title danger" : "row-title" }, a.label),
+                  ico(a.icon, a.danger ? "icon row-icon danger" : "icon row-icon"),
+                ),
+              ),
+            ),
+          ),
+        );
+      }, 480);
+    },
+    { passive: true },
+  );
+  row.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!start) return;
+      const t = e.touches[0];
+      if (Math.hypot(t.clientX - start.x, t.clientY - start.y) > 8) cancel();
+    },
+    { passive: true },
+  );
+  row.addEventListener("touchend", cancel);
+  row.addEventListener("touchcancel", cancel);
+  row.addEventListener(
+    "click",
+    (e) => {
+      if (!held) return;
+      held = false;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    },
+    { capture: true },
+  );
+  // No text callout or link preview of its own over the menu.
+  row.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+/** A close that did not go through, said in a sheet: the row it came from
+ * has no room for it. */
+function closeFailed(name: string, message: string) {
+  openSheet(`Couldn't close ${name}`, h("div", { class: "sheet-body" }, h("p", { class: "sheet-text" }, message)));
 }
 
 /** A pane's avatar, as the desktop's tab strip draws it: the agent's mark on
@@ -1789,6 +2293,18 @@ function avatar(agent: AgentView | null | undefined, cls = "avatar") {
     } else el.append(h("span", { class: "glyph" }, look.name.slice(0, 2)));
   } else el.append(h("span", { class: "glyph" }, ">_"));
   return el;
+}
+
+/** A path's last segment: a directory's own name. */
+function baseName(path: string) {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+/** Where a directory is: the path up to its own name, its far end kept. */
+function parentPath(path: string) {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length <= 1) return "";
+  return shortPath(`${path.startsWith("/") ? "/" : ""}${parts.slice(0, -1).join("/")}`);
 }
 
 /** The last two segments of a path: the part that tells panes apart. */
@@ -1834,11 +2350,17 @@ interface MenuItem {
 
 /** A trailing ⋯ button with a small menu that drops from it. Items can be
  * given as a function, to be read afresh each time it opens. */
+/** When a menu was last put away by a press outside it: that press is the
+ * menu's, not whatever lies under it. */
+let menuDismissedAt = 0;
+
 function menuButton(items: MenuItem[] | (() => MenuItem[]), cls = "nav-icon") {
   const wrap = h("div", { class: "menu-wrap" });
   const list = h("div", { class: "menu", role: "menu", hidden: true });
   const outside = (e: Event) => {
-    if (!wrap.contains(e.target as Node)) close();
+    if (wrap.contains(e.target as Node)) return;
+    menuDismissedAt = performance.now();
+    close();
   };
   const close = () => {
     list.hidden = true;
@@ -2037,7 +2559,9 @@ const drafts = new Map<string, string>();
 
 /** `run` is typed into the pane, then Enter, once it is first live: the
  * agent a new tab was opened for. */
-function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, run?: string) {
+/** `made` is a tab this phone just opened: it runs at the phone's size from
+ * the start, since nobody is reading it anywhere else yet. */
+function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, tab?: TabRef, run?: string, made = false) {
   go("push", () => {
     // What the pane is doing and whether keystrokes will land, in words: the
     // one line under the title.
@@ -2070,6 +2594,27 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           icon: "phone" as const,
           run: toggleTake,
         },
+        ...(tab
+          ? [
+              {
+                label: "Close tab",
+                icon: "close" as const,
+                danger: true,
+                run: async () => {
+                  // Asked here whatever runs in it: this is the screen it is
+                  // closed from, not a list it can be seen to leave.
+                  const busy = tab.busy || agentWaiting || paneAgentWorking;
+                  if (
+                    !busy &&
+                    !(await confirmSheet(`Close ${tab.name}?`, "You can reopen it from tty7 on your computer.", "Close tab"))
+                  )
+                    return;
+                  if (await closeTab(host, place, { ...tab, busy }, (message) => showBanner(message)))
+                    hostScreen(host);
+                },
+              },
+            ]
+          : []),
       ],
       "round",
     );
@@ -2078,7 +2623,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const bar = h(
       "header",
       { class: "term-nav" },
-      h("button", { class: "round", ariaLabel: `Back to ${host.name}`, onclick: back }, ico("back")),
+      h("button", { class: "round term-back", ariaLabel: `Back to ${host.name}`, onclick: back }, ico("back")),
       h("div", { class: "term-titles" }, h("span", { class: "term-title" }, title), sub),
       menu,
     );
@@ -2089,10 +2634,27 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // way — handles, magnifier, Copy.
     const copyText = h("pre", { class: "term-copy-text" });
     const copyDone = h("button", { class: "button tinted small" }, "Done");
+    // The whole pane in one tap, for pasting into a note or a message.
+    const copyAll = h("button", { class: "button tinted small" }, "Copy all");
+    copyAll.onclick = () => {
+      navigator.clipboard?.writeText(copyText.textContent ?? "").then(
+        () => {
+          feel("tick");
+          copyAll.textContent = "Copied";
+          setTimeout(() => (copyAll.textContent = "Copy all"), 1500);
+        },
+        () => {},
+      );
+    };
     const copyView = h(
       "div",
       { class: "term-copy", hidden: true },
-      h("div", { class: "term-copy-bar" }, h("span", {}, "Select text to copy"), copyDone),
+      h(
+        "div",
+        { class: "term-copy-bar" },
+        h("span", {}, "Select text to copy"),
+        h("div", { class: "term-copy-actions" }, copyAll, copyDone),
+      ),
       copyText,
     );
     // Find in the pane's scrollback: the match is selected and scrolled to.
@@ -2129,10 +2691,19 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       class: "compose-input",
       rows: 1,
       value: drafts.get(draftKey) ?? "",
-      placeholder: pane.agent ? `Message ${agentLook(pane.agent.kind).name}…` : "Type a command…",
       enterKeyHint: "send",
       ariaLabel: "Message",
     });
+    // Prose for an agent, so the keyboard helps as it does in a chat:
+    // capitals, corrections. A command for a shell, where it only gets in
+    // the way: `ls` must not become `Ls`.
+    const writeFor = (agent: AgentView | null | undefined) => {
+      field.placeholder = agent ? `Message ${agentLook(agent.kind).name}…` : "Type a command…";
+      field.autocapitalize = agent ? "sentences" : "off";
+      field.spellcheck = !!agent;
+      field.setAttribute("autocorrect", agent ? "on" : "off");
+    };
+    writeFor(pane.agent);
     const sendKey = h("button", { class: "round send", ariaLabel: "Send" }, ico("send"));
     // Typing straight into the terminal, key by key, for what a message box
     // cannot do: a full-screen program, a password prompt.
@@ -2145,11 +2716,43 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const attachKey = h("button", { class: "round", ariaLabel: "Attach a photo or file" }, ico("attach"));
     const picker = h("input", { type: "file", multiple: true, hidden: true });
     const compose = h("div", { class: "compose" }, attachKey, historyKey, field, sendKey, keyboard, picker);
+    // Files sent to the machine, waiting to go with the message: shown by
+    // name and picture, their paths written in only when it is sent.
+    const attached: { path: string; name: string; thumb: string | null }[] = [];
+    const chips = h("div", { class: "attach-chips", hidden: true });
+    const drawChips = () => {
+      chips.replaceChildren(
+        ...attached.map((a, i) => {
+          const drop = h("button", { class: "attach-drop", ariaLabel: `Remove ${a.name}` }, ico("close"));
+          drop.onpointerdown = (e) => e.preventDefault();
+          drop.onclick = () => {
+            if (a.thumb) URL.revokeObjectURL(a.thumb);
+            attached.splice(i, 1);
+            drawChips();
+            edited();
+          };
+          return h(
+            "div",
+            { class: "attach-chip" },
+            a.thumb ? h("img", { class: "attach-thumb", src: a.thumb, alt: "" }) : h("span", { class: "attach-thumb" }, ico("attach")),
+            h("span", { class: "attach-name" }, a.name),
+            drop,
+          );
+        }),
+      );
+      chips.hidden = attached.length === 0;
+    };
+    const clearAttached = () => {
+      for (const a of attached) if (a.thumb) URL.revokeObjectURL(a.thumb);
+      attached.length = 0;
+      drawChips();
+    };
     const suggest = h("div", { class: "suggest", hidden: true });
     // An agent's numbered choices — a permission to grant, a question — as
     // buttons over the key row while it waits for an answer.
     const answers = h("div", { class: "answers", hidden: true, role: "group", ariaLabel: "Answers" });
     let agentWaiting = pane.agent?.status === "waiting";
+    let paneAgentWorking = pane.agent?.status === "working";
     // What typing straight into the terminal goes through. xterm's own hidden
     // textarea is not: iOS input methods never commit into it (a pinyin
     // candidate stays unwritten), so this one, a plain field the keyboard
@@ -2165,19 +2768,33 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     typing.setAttribute("autocorrect", "off");
     typing.setAttribute("autocomplete", "off");
 
+    // Until the pane's screen first arrives, a sign that it is on its way,
+    // not an empty pane; held back a moment so a quick link never flashes it.
+    const loading = h("div", { class: "term-loading", hidden: true }, h("span"), h("span"), h("span"));
+    const loadingSoon = window.setTimeout(() => (loading.hidden = false), 250);
+    const loaded = () => {
+      clearTimeout(loadingSoon);
+      loading.remove();
+    };
+    // Back in the history, the way down to what is happening now is one tap.
+    const latest = h("button", { class: "to-latest", ariaLabel: "Jump to the latest output", hidden: true }, ico("down"));
     const view = h(
       "div",
       { class: "screen term-screen" },
       bar,
-      h("div", { class: "term-wrap" }, screenEl, typing, copyView, findBar, banner),
-      h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, compose),
+      h("div", { class: "term-wrap" }, screenEl, loading, typing, copyView, findBar, latest, banner),
+      h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, chips, compose),
     );
 
     const term = new Terminal({
       cols: 80,
       rows: 24,
       fontSize: readablePx(),
-      fontFamily: "Hack, Menlo, ui-monospace, monospace",
+      // CJK named outright: drawing into the glyph atlas, WebKit does not
+      // fall back past the web fonts to the system's, and Chinese, Japanese
+      // and Korean come out as boxes.
+      fontFamily:
+        'Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", "PingFang SC", "Hiragino Sans", "Apple SD Gothic Neo", Menlo, ui-monospace, monospace',
       scrollback: 5000,
       cursorBlink: false,
       theme: terminalTheme(),
@@ -2209,6 +2826,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     });
     const finding = (on: boolean) => {
       findBar.hidden = !on;
+      // Searching, the keys and the message box are of no use: the matches
+      // get their room, up to the keyboard.
+      view.classList.toggle("finding", on);
       if (on) findInput.focus();
       else {
         search.clearDecorations();
@@ -2217,15 +2837,40 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         findCount.textContent = "";
       }
     };
+    // The find bar floats over the pane's top rows; a match scrolled to the
+    // top of the view would sit under it, so the view comes down a little.
+    const clearOfBar = () =>
+      requestAnimationFrame(() => {
+        const at = term.getSelectionPosition();
+        const buf = term.buffer.active;
+        if (!at) return;
+        const h = rowHeight();
+        const barBottom = findBar.offsetTop + findBar.offsetHeight + 4;
+        const box = screenEl.querySelector<HTMLElement>(".xterm");
+        const pad =
+          (parseFloat(getComputedStyle(screenEl).paddingTop) || 0) + (box ? parseFloat(getComputedStyle(box).marginTop) || 0 : 0);
+        // Where the match's row is in the pane's box, which itself scrolls
+        // when the keyboard leaves it short.
+        let top = pad + (at.start.y - buf.viewportY) * h;
+        if (top - screenEl.scrollTop < barBottom && buf.viewportY > 0) {
+          const back = Math.min(buf.viewportY, Math.ceil((barBottom - (top - screenEl.scrollTop)) / h) + 1);
+          term.scrollLines(-back);
+          top += back * h;
+        }
+        if (top - screenEl.scrollTop < barBottom) screenEl.scrollTop = Math.max(0, top - barBottom);
+        else if (top + h > screenEl.scrollTop + screenEl.clientHeight) screenEl.scrollTop = top + h - screenEl.clientHeight;
+      });
     // Up is back through the scrollback, as the pane reads.
     const find = (back: boolean) => {
       if (!findInput.value) return;
       if (back) search.findPrevious(findInput.value, findOptions);
       else search.findNext(findInput.value, findOptions);
+      clearOfBar();
     };
     findInput.oninput = () => {
       if (findInput.value) {
         search.findPrevious(findInput.value, { ...findOptions, incremental: true });
+        clearOfBar();
       } else {
         search.clearDecorations();
         term.clearSelection();
@@ -2274,7 +2919,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     let ended = false;
     // The phone's size: `wanted` is what the user asked for, `leased` what
     // the daemon confirmed, `sent` the grid last asked for.
-    let wanted = false;
+    // Kept per pane: one taken over last time is taken over again on return.
+    const takeKey = `take.${host.id}.${place?.key ?? ""}.${pane.id}`;
+    // A tab opened here is the phone's: it keeps the phone's size on later
+    // visits too, so it follows the keyboard rather than hiding under it.
+    if (made) remember(takeKey, "1");
+    let wanted = remembered(takeKey) === "1";
     let leased = false;
     let releasing = false;
     let sent = "";
@@ -2285,10 +2935,45 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // A drop is retried on its own, sooner at first; the pane stays on
     // screen as it was until the new stream replaces it.
     const retry = retrier(() => reopen());
+    // A pane its server no longer has — restarted since, and not started
+    // again — is not coming back by retrying: said so, with a way on.
+    const gone = () => {
+      loaded();
+      ended = true;
+      live = false;
+      retry.cancel();
+      setState("offline", "Not running");
+      // Nothing typed here would go anywhere: the box and keys say so
+      // rather than taking it and doing nothing.
+      field.blur();
+      typing.blur();
+      field.disabled = true;
+      field.placeholder = "This pane isn't running";
+      view.classList.add("ended");
+      const fresh = tab && {
+        label: "New tab here",
+        run: async () => {
+          try {
+            const made = await api.tabNew(host.id, place?.key ?? null, tab.workspace, paneCwd, phoneGrid());
+            const name = paneCwd ? baseName(paneCwd) : "Shell";
+            terminalScreen(host, place, { id: made.pane_id, title: name, cwd: paneCwd }, name, {
+              workspace: tab.workspace,
+              id: made.tab_id,
+              name,
+              busy: false,
+            }, undefined, true);
+          } catch (e) {
+            showBanner(sentence(errorText(e)));
+          }
+        },
+      };
+      showBanner(`This pane isn't running. tty7 on ${host.name} starts it again when it next opens the tab.`, fresh || undefined);
+    };
     const offline = (message: string) => {
+      if (/no such pane/i.test(message)) return gone();
       live = false;
       setState("connecting", "Reconnecting");
-      showBanner(`${sentence(message)} Reconnecting…`, { label: "Try now", run: reopen });
+      showBanner(`${why(message, host.name)} Reconnecting…`, { label: "Try now", run: reopen });
       retry.schedule();
     };
     // Only the first refusal speaks: a key typed just before it fails on its
@@ -2348,6 +3033,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // so the soft keyboard stays as it is.
         key.onpointerdown = (e) => e.preventDefault();
         key.onclick = () => {
+          feel("key");
           if (k.latch) {
             ctrl = !ctrl;
             key.classList.toggle("on", ctrl);
@@ -2376,9 +3062,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (field.value) drafts.set(draftKey, field.value);
       else drafts.delete(draftKey);
       // Written, the round button sends; empty, it is the keyboard's.
-      sendKey.hidden = !field.value;
-      keyboard.hidden = !!field.value;
-      historyKey.hidden = !!field.value;
+      const ready = !!field.value || attached.length > 0;
+      sendKey.hidden = !ready;
+      keyboard.hidden = ready;
+      historyKey.hidden = ready;
       grow();
       offer();
     };
@@ -2401,6 +3088,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       dots.classList.toggle("covered", found.length > 0 || !answers.hidden);
     };
     field.addEventListener("focus", offer);
+    // Typing goes where the cursor is: a view panned away comes back to it.
+    field.addEventListener("focus", () => follow());
     field.addEventListener("blur", offer);
 
     historyKey.onpointerdown = (e) => e.preventDefault();
@@ -2469,13 +3158,16 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (!files.length) return;
       attachKey.classList.add("busy");
       attachKey.disabled = true;
-      const paths: string[] = [];
+      let added = 0;
       try {
         for (const file of files) {
           if (file.size > MAX_UPLOAD) {
             throw new Error(`${file.name} is ${Math.ceil(file.size / 2 ** 20)} MB; files up to ${MAX_UPLOAD / 2 ** 20} MB can be sent`);
           }
-          paths.push(await api.upload(host.id, null, file.name, new Uint8Array(await file.arrayBuffer())));
+          const path = await api.upload(host.id, null, file.name, new Uint8Array(await file.arrayBuffer()));
+          const thumb = file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
+          attached.push({ path, name: baseName(path), thumb });
+          added++;
         }
       } catch (e) {
         showBanner(`Couldn't send the file: ${sentence(errorText(e))}`, { label: "OK", run: clearBanner });
@@ -2483,11 +3175,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         attachKey.classList.remove("busy");
         attachKey.disabled = false;
       }
-      if (!paths.length) return;
-      // Its own word, before and after, so it reads as a path whatever is
-      // written around it.
-      const before = field.value && !/\s$/.test(field.value) ? `${field.value} ` : field.value;
-      field.value = `${before}${paths.join(" ")} `;
+      if (!added) return;
+      drawChips();
       edited();
       field.focus({ preventScroll: true });
     };
@@ -2500,7 +3189,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       return /pass(word|phrase)|\bpin\b|密码|口令/i.test(line);
     };
     const submit = async () => {
-      const body = field.value.replace(/\r?\n/g, "\r");
+      // What was written, then the files, each its own word — quoted where
+      // a name has a space — so a shell takes them as a command's arguments
+      // and an agent as what the message is about.
+      const paths = attached.map((a) => (/\s/.test(a.path) ? `'${a.path.replace(/'/g, "'\\''")}'` : a.path));
+      const text = [field.value.trimEnd(), ...paths].filter(Boolean).join(" ");
+      const body = text.replace(/\r?\n/g, "\r");
       // Several lines go in as one paste where the program asked for that,
       // so an agent takes them as one message and a shell does not run each.
       const data = body.includes("\r") && term.modes.bracketedPasteMode ? `\x1b[200~${body}\x1b[201~` : body;
@@ -2509,18 +3203,44 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       // how the bytes arrive would otherwise take it as part of the text.
       // An empty box sends Enter alone.
       if (!(await input("\r"))) return;
-      if (!answersSecret()) keepSent(field.value);
+      if (!answersSecret() && field.value) keepSent(field.value);
       field.value = "";
+      clearAttached();
       edited();
     };
+    // Return sends; Shift-Return starts a line, on a keyboard with a real
+    // Shift. The phone's own keyboard says Shift whenever it has armed a
+    // capital — at the start, after a full stop — so there it is ignored.
+    const hardKeys = matchMedia("(any-pointer: fine)");
+    let newLine = false;
     field.addEventListener("keydown", (e) => {
+      const shifted = e.shiftKey && hardKeys.matches;
+      newLine = e.key === "Enter" && shifted;
       // Enter that confirms an IME's candidate is the IME's, not a send.
-      if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+      if (e.key !== "Enter" || shifted || e.isComposing || e.keyCode === 229) return;
       e.preventDefault();
       void submit();
     });
+    // A Return that comes as text with no key behind it sends too. The
+    // on-screen keyboard delivers it that way — as a line break, or, with
+    // corrections on, as a typed newline once it has settled the word —
+    // and not always cancellably, so the newline is taken back out.
+    field.addEventListener("input", (e) => {
+      const wasShift = newLine;
+      newLine = false;
+      const typed = e as InputEvent;
+      const newline =
+        typed.inputType === "insertLineBreak" || typed.inputType === "insertParagraph" || typed.data === "\n";
+      if (!newline || typed.isComposing || wasShift) return;
+      const at = field.selectionStart;
+      if (field.value[at - 1] === "\n") {
+        field.value = field.value.slice(0, at - 1) + field.value.slice(at);
+        edited();
+      }
+      void submit();
+    });
     sendKey.onpointerdown = (e) => e.preventDefault();
-    sendKey.onclick = () => void submit();
+    sendKey.onclick = () => (feel("key"), void submit());
 
     keyboard.onpointerdown = (e) => e.preventDefault();
     keyboard.onclick = () => {
@@ -2589,6 +3309,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       }
       const fitted = fittedSize();
       cramped = fitted < readablePx();
+      if (cramped) hintPhoneSize();
       term.options.fontSize = cramped && readable ? readablePx() : Math.max(4, fitted);
       screenEl.classList.toggle("panning", cramped && readable);
       follow();
@@ -2733,7 +3454,18 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     let ownScroll = false;
     term.onScroll(() => {
       if (!ownScroll && frac) setFrac(0);
+      const buf = term.buffer.active;
+      latest.hidden = buf.baseY - buf.viewportY < 3;
     });
+    latest.onpointerdown = (e) => e.preventDefault();
+    latest.onclick = () => {
+      shield();
+      feel("tick");
+      setFrac(0);
+      term.scrollToBottom();
+      latest.hidden = true;
+      requestAnimationFrame(showCursor);
+    };
     // Moves the view by a distance in pixels. Dragging down goes back in the
     // scrollback.
     const scrollBy = (dy: number) => {
@@ -2815,10 +3547,15 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // focus to its own textarea.
         if (lifted && !lifted.axis && e.cancelable) {
           e.preventDefault();
+          // A tap that closed an open menu does only that.
+          if (performance.now() - menuDismissedAt < 500) return;
           // A link under the finger opens in the browser instead.
           const at = e.changedTouches[0];
           const url = at && linkAt(at.clientX, at.clientY);
           if (url) void openUrl(url).catch(() => {});
+          // Writing a message, a tap above it puts the keyboard away, as
+          // tapping outside a field does anywhere on the phone.
+          else if (document.activeElement === field) field.blur();
           else typing.focus({ preventScroll: true });
           return;
         }
@@ -2891,6 +3628,27 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (x < screenEl.scrollLeft + cell * 4 || x > screenEl.scrollLeft + view - cell * 4)
         screenEl.scrollLeft = Math.max(0, x - view / 2);
     };
+    // The first few panes too wide to read whole say once that the pane can
+    // run at the phone's size: otherwise only the ⋯ menu knows.
+    let hinted = false;
+    const hintPhoneSize = () => {
+      const seen = Number(remembered("hint.phoneSize") ?? 0);
+      if (hinted || wanted || leased || seen >= 3 || !live || banner.hasChildNodes()) return;
+      hinted = true;
+      remember("hint.phoneSize", String(seen + 1));
+      showBanner("Wider than this phone.", {
+        label: "Use phone size",
+        run: () => {
+          remember("hint.phoneSize", "3");
+          banner.replaceChildren();
+          toggleTake();
+        },
+      });
+      const shown = banner.firstChild;
+      setTimeout(() => {
+        if (banner.firstChild === shown) banner.replaceChildren();
+      }, 8000);
+    };
     const toggleZoom = () => {
       readable = !readable;
       fit();
@@ -2927,6 +3685,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const liveLabel = () => (leased ? "Live · phone size" : "Live");
     const toggleTake = () => {
       wanted = !wanted;
+      remember(takeKey, wanted ? "1" : "");
       if (wanted) {
         sent = "";
         askLease();
@@ -2953,6 +3712,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         releasing = false;
         if (refused) {
           wanted = false;
+          remember(takeKey, "");
           showBanner(sentence(refused));
         } else if (was && !ours) {
           // Nobody here let go: the desktop took it back, or another device
@@ -3035,12 +3795,49 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // Codex draw them ("❯ 1. Yes", "2. No, and tell Claude…"), box edges and
     // the cursor mark stripped.
     const readChoices = () => {
-      const found: { n: string; label: string }[] = [];
-      if (agentWaiting) {
+      // `n` is typed to pick it; `keys`, where given, is sent instead.
+      const found: { n: string; label: string; keys?: string }[] = [];
+      // A menu picked with the arrows, no numbers — an agent's "trust this
+      // folder?" — said by the hint under it. Its options are the lines
+      // above, at the selected one's indent; picking one moves to it and
+      // presses Enter.
+      {
+        const buf = term.buffer.active;
+        const rows: string[] = [];
+        for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
+        let hint = -1;
+        for (let y = rows.length - 1; y >= 0 && hint < 0; y--) if (/Enter to (confirm|select)/i.test(rows[y])) hint = y;
+        if (hint > 0) {
+          let y = hint - 1;
+          while (y >= 0 && !rows[y].trim()) y--;
+          const block: string[] = [];
+          for (; y >= 0 && rows[y].trim(); y--) block.unshift(rows[y]);
+          const sel = block.findIndex((l) => /^\s*❯\s/.test(l));
+          if (sel >= 0 && !/^\s*❯\s+\d{1,2}[.)]\s/.test(block[sel])) {
+            const col = block[sel].indexOf("❯");
+            const options = block
+              .map((l, i) => ({ l, i }))
+              .filter(({ l, i }) => i === sel || (l.slice(0, col + 2).trim() === "" && l[col + 2] !== " "));
+            const at = options.findIndex((o) => o.i === sel);
+            if (options.length >= 2 && options.length <= 9)
+              options.forEach((o, k) => {
+                const step = k > at ? "\x1b[B" : "\x1b[A";
+                found.push({
+                  n: String(k + 1),
+                  label: o.l.replace(/^\s*❯?\s*/, ""),
+                  keys: step.repeat(Math.abs(k - at)) + "\r",
+                });
+              });
+          }
+        }
+      }
+      if (agentWaiting && !found.length) {
+        // The whole screen: the terminal here can be taller than the pane,
+        // with the agent's menu well above its bottom rows.
         const buf = term.buffer.active;
         const bottom = buf.baseY + term.rows;
         let run: typeof found = [];
-        for (let y = Math.max(0, bottom - 24); y < bottom; y++) {
+        for (let y = buf.baseY; y < bottom; y++) {
           const text = (buf.getLine(y)?.translateToString(true) ?? "")
             .replace(/^[\s│┃|]+|[\s│┃|]+$/g, "")
             .replace(/^[❯›>▸●◉○]\s*/, "");
@@ -3059,7 +3856,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         ...found.map((c) => {
           const b = h("button", { class: "answer" }, h("b", {}, c.n), h("span", {}, c.label));
           b.onpointerdown = (e) => e.preventDefault();
-          b.onclick = () => send(c.n);
+          b.onclick = () => (feel("key"), send(c.keys ?? c.n));
           return b;
         }),
       );
@@ -3070,19 +3867,39 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     let choicesFrame = 0;
     term.onWriteParsed(() => {
-      if (!agentWaiting || choicesFrame) return;
+      if (choicesFrame) return;
       choicesFrame = requestAnimationFrame(() => {
         choicesFrame = 0;
         readChoices();
       });
     });
+    // A button over the pane that takes itself away when tapped leaves the
+    // tap to land again on the pane beneath, which brings up its keyboard;
+    // a clear cover takes that tap instead, for a moment.
+    const shield = () => {
+      const cover = h("div", { class: "term-shield" });
+      view.querySelector(".term-wrap")?.append(cover);
+      window.setTimeout(() => cover.remove(), 400);
+    };
     const showBanner = (text: string, action?: { label: string; run: () => void }) =>
       banner.replaceChildren(
         h(
           "div",
           { class: "term-banner" },
           h("span", {}, text),
-          action && h("button", { class: "button tinted small", onclick: action.run }, action.label),
+          action &&
+            h(
+              "button",
+              {
+                class: "button tinted small",
+                onpointerdown: (e: Event) => e.preventDefault(),
+                onclick: () => {
+                  shield();
+                  action.run();
+                },
+              },
+              action.label,
+            ),
         ),
       );
 
@@ -3098,6 +3915,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       const replay = () => {
         if (replayed) return;
         replayed = true;
+        loaded();
         term.reset();
       };
       live = false;
@@ -3112,6 +3930,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
             if (!current()) return;
             replay();
             term.write(bytes);
+            if (run) runSoon();
           },
           (event) => {
             if (!current()) return;
@@ -3125,10 +3944,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
                 break;
               case "agent":
                 agentWaiting = event.agent?.status === "waiting";
+                paneAgentWorking = event.agent?.status === "working";
                 readChoices();
-                field.placeholder = event.agent
-                  ? `Message ${agentLook(event.agent.kind).name}…`
-                  : "Type a command…";
+                writeFor(event.agent);
                 break;
               case "cwd":
                 paneCwd = event.path;
@@ -3167,15 +3985,31 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         retry.reset();
         banner.replaceChildren();
         setState("live", liveLabel());
-        // A new tab's agent, started once: not again on a reconnect.
-        if (run) {
-          const command = run;
-          run = undefined;
-          void input(`${command}\r`);
-        }
+        if (cramped) hintPhoneSize();
+        runSoon();
       } catch (e) {
         if (current()) offline(errorText(e));
       }
+    };
+    // A new tab's agent is typed in once its shell has started: a key sent
+    // while the shell is still printing its greeting is eaten, and the
+    // command would sit at the prompt unrun. Started is when the output
+    // has gone quiet, or after a while whatever it is doing. Once: not
+    // again on a reconnect.
+    let runTimer: number | undefined;
+    const runBy = performance.now() + 6000;
+    const runSoon = () => {
+      if (!run) return;
+      clearTimeout(runTimer);
+      runTimer = window.setTimeout(
+        () => {
+          if (!run || !live || !alive) return;
+          const command = run;
+          run = undefined;
+          void input(`${command}\r`);
+        },
+        performance.now() > runBy ? 0 : 700,
+      );
     };
     const reopen = () => {
       if (handle !== null) api.paneClose(handle);
@@ -3187,9 +4021,97 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     window.addEventListener("online", online);
 
+    // The machine's other agents, heard while this pane is open: one that
+    // stops for an answer or finishes its turn says so over the pane, with
+    // a way there. Only changes count; what was already so when the pane
+    // opened is old news.
+    const peek = h("div", { class: "peek-slot" });
+    view.querySelector(".term-wrap")?.append(peek);
+    let others = new Map<string, AgentStatus>();
+    let heard = false;
+    let peekTimer: number | undefined;
+    // The pane the card on screen is about, so it goes once that is settled.
+    let peekKey: string | null = null;
+    const ownKey = `${place?.key ?? ""}/${pane.id}`;
+    const dropPeek = () => {
+      clearTimeout(peekTimer);
+      peekKey = null;
+      peek.replaceChildren();
+    };
+    const showPeek = (key: string, where: Place, ws: WorkspaceView, tab: TabView, other: PaneView) => {
+      const agent = other.agent!;
+      const name = /^[~/]/.test(tab.name) ? baseName(tab.name) : tab.name;
+      const close = h("button", { class: "peek-close", ariaLabel: "Dismiss" }, ico("close"));
+      close.onpointerdown = (e) => e.preventDefault();
+      // Faded, then gone: taken away under the finger at once, the tap
+      // lands again on the pane beneath and brings up its keyboard.
+      close.onclick = (e) => {
+        e.stopPropagation();
+        card.classList.add("leaving");
+        peekKey = null;
+        clearTimeout(peekTimer);
+        peekTimer = window.setTimeout(dropPeek, 400);
+      };
+      const card = h(
+        "div",
+        {
+          class: `peek ${agent.status}`,
+          role: "button",
+          onclick: () => terminalScreen(host, where, other, name, tabRef(ws, tab, name)),
+        },
+        avatar(agent),
+        h(
+          "span",
+          { class: "peek-text" },
+          h("span", { class: "peek-title" }, agent.status === "waiting" ? `${agentLook(agent.kind).name} needs you` : `${agentLook(agent.kind).name} is done`),
+          h("span", { class: "peek-sub" }, agent.message || name),
+        ),
+        close,
+      );
+      peek.replaceChildren(card);
+      peekKey = key;
+      feel("tick");
+      clearTimeout(peekTimer);
+      // One waiting stays until it is answered or put away; one that is
+      // done is news for a moment.
+      if (agent.status !== "waiting") peekTimer = window.setTimeout(dropPeek, 15_000);
+    };
+    // While another agent waits, the way back carries a dot, card or no card.
+    const backButton = view.querySelector<HTMLElement>(".term-back");
+    let peeking: number | null = null;
+    api
+      .watch(host.id, (msg) => {
+        if (msg.type !== "tree" || !alive) return;
+        const now = new Map<string, AgentStatus>();
+        const spaces: [Place, WorkspaceView][] = [
+          ...msg.tree.workspaces.map((ws): [Place, WorkspaceView] => [null, ws]),
+          ...(msg.tree.remotes ?? []).flatMap((r) => r.workspaces.map((ws): [Place, WorkspaceView] => [{ key: r.key, name: r.name }, ws])),
+        ];
+        for (const [where, ws] of spaces)
+          for (const tab of ws.tabs)
+            for (const other of tab.panes) {
+              if (!other.agent) continue;
+              const key = `${where?.key ?? ""}/${other.id}`;
+              now.set(key, other.agent.status);
+              const was = others.get(key);
+              const news = other.agent.status === "waiting" || other.agent.status === "done";
+              if (heard && key !== ownKey && news && was !== other.agent.status) showPeek(key, where, ws, tab, other);
+            }
+        if (peekKey && now.get(peekKey) === "working") dropPeek();
+        backButton?.classList.toggle("attention", [...now].some(([key, status]) => key !== ownKey && status === "waiting"));
+        others = now;
+        heard = true;
+      })
+      .then(
+        (id) => (alive ? (peeking = id) : void api.unwatch(id).catch(() => {})),
+        () => {},
+      );
+
     onLeave = () => {
       alive = false;
       retry.cancel();
+      clearTimeout(peekTimer);
+      if (peeking !== null) api.unwatch(peeking).catch(() => {});
       window.removeEventListener("online", online);
       window.removeEventListener("resize", fit);
       window.removeEventListener("resize", regridSoon);
@@ -3204,9 +4126,16 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     onResume = reopen;
 
     // Hack has to be loaded before xterm measures a cell, or the first fit is
-    // taken with the fallback face's metrics.
+    // taken with the fallback face's metrics; the symbols before a glyph is
+    // drawn, or the GPU's glyph cache keeps the empty box it got instead.
     requestAnimationFrame(() => {
-      document.fonts.load("12px Hack").finally(() => {
+      Promise.allSettled([
+        document.fonts.load("12px Hack"),
+        document.fonts.load('12px "Symbols Nerd Font Mono"', "\ue0a0"),
+        document.fonts.load('12px "Noto Sans Symbols"', "\u23bf"),
+        document.fonts.load('12px "Noto Sans Symbols 2"', "\u23fa"),
+        document.fonts.load('12px "Noto Emoji"', "\u23f0"),
+      ]).finally(() => {
         if (!alive) return;
         term.open(screenEl);
         // Drawn on the GPU: the DOM renderer lays every row out again on each
@@ -3229,4 +4158,37 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
 }
 
 if (prefs.lock) lock();
-hostsScreen("push");
+
+// A pairing code opened as a link — the desktop's QR code, read by the
+// phone's camera — goes straight to pairing. The link is taken once, from
+// the native side, which holds it until asked: one that launched the app
+// can arrive before the page, or between the page's first look and its
+// first screen.
+let started = false;
+const takeLink = () =>
+  api.openedLink().then(
+    (code) => code && pairScreen(code),
+    () => {},
+  );
+const listening = listen("opened-link", () => started && void takeLink()).catch(() => {});
+
+// Back where it was left: the machine last open, unless it was left for the
+// list of machines; or pairing, when that is what opened the app.
+void listening.then(() =>
+  Promise.all([api.hosts(), api.openedLink().catch(() => null)]).then(
+    ([hosts, code]) => {
+      const last = hosts.find((host) => host.id === remembered("last.host"));
+      if (code) {
+        hostsScreen("push");
+        pairScreen(code);
+      } else if (last) hostScreen(last, "push");
+      else hostsScreen("push");
+      started = true;
+      void takeLink();
+    },
+    () => {
+      hostsScreen("push");
+      started = true;
+    },
+  ),
+);
