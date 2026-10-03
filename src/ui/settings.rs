@@ -655,6 +655,21 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchAntigravityKeywords,
         },
         SearchEntry {
+            section: Agents,
+            title: SettingsAgentEmpryo,
+            keywords: SettingsSearchEmpryoKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentJcode,
+            keywords: SettingsSearchJcodeKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentMuse,
+            keywords: SettingsSearchMuseKeywords,
+        },
+        SearchEntry {
             section: General,
             title: SettingsStartupWindow,
             keywords: SettingsSearchStartupWindowKeywords,

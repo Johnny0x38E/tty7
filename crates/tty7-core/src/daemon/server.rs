@@ -126,21 +126,22 @@ impl crate::host::server::PaneDirectory for Registry {
 /// so being up to a minute late to notice costs nothing.
 const AGENT_STALE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The pane a Codex hook's report is about, found from the report itself —
-/// where a hook runs says nothing for Codex (see
-/// [`crate::daemon::pane::codex_report_target`]). `None` for any other agent's
-/// report, which goes to the pane the hook named.
+/// The pane a Codex or jcode hook's report is about, found from the report
+/// itself — where a hook runs says nothing for an agent that runs its hooks in
+/// a shared server (see [`crate::daemon::pane::codex_report_target`]). `None`
+/// for any other agent's report, which goes to the pane the hook named.
 fn codex_report_pane(
     registry: &Registry,
     named: u64,
     body: &str,
 ) -> Option<(Arc<DaemonPane>, crate::core::cli_agent::AgentEvent)> {
     let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes())?;
-    if event.agent != Some(crate::core::cli_agent::CLIAgent::Codex) {
-        return None;
-    }
+    use crate::core::cli_agent::CLIAgent;
+    let agent = event
+        .agent
+        .filter(|a| matches!(a, CLIAgent::Codex | CLIAgent::Jcode))?;
     let panes = registry.all();
-    let candidates: Vec<_> = panes.iter().map(|p| p.codex_candidate()).collect();
+    let candidates: Vec<_> = panes.iter().map(|p| p.codex_candidate(agent)).collect();
     let target = crate::daemon::pane::codex_report_target(
         &candidates,
         named,

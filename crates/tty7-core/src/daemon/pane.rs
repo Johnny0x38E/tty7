@@ -2563,12 +2563,13 @@ impl DaemonPane {
         Ok(())
     }
 
-    /// This pane as a Codex report sees it, for [`codex_report_target`].
-    pub fn codex_candidate(&self) -> CodexCandidate {
+    /// This pane as a report from `agent`'s shared server sees it, for
+    /// [`codex_report_target`].
+    pub fn codex_candidate(&self, agent: crate::core::cli_agent::CLIAgent) -> CodexCandidate {
         let st = self.state.lock().unwrap();
         CodexCandidate {
             pane: self.id,
-            runs_codex: st.alive && st.agent == Some(crate::core::cli_agent::CLIAgent::Codex),
+            runs_codex: st.alive && st.agent == Some(agent),
             cwd: st.cwd.clone(),
             session: st.agent_session.as_ref().and_then(|s| s.session_id.clone()),
         }
@@ -3614,6 +3615,11 @@ pub struct CodexCandidate {
 /// started (`cleared`) goes to one that had a session before and any other to
 /// one yet to report, and the named pane breaks a tie that still stands.
 /// `None` is no pane, or no telling which.
+///
+/// jcode is built the same way — its sessions share one background server
+/// that runs every session's hooks with the environment of whichever client
+/// started it — so its reports take the same road, with `runs_codex` meaning
+/// "runs jcode".
 pub fn codex_report_target(
     panes: &[CodexCandidate],
     named: u64,

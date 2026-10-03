@@ -52,7 +52,7 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 
 | | |
 |---|---|
-| **Agent-aware** | per-pane detection (26 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · reopen any past session from Search Everywhere · one-key launch · tab sidebar grouped by repository, with pinned groups |
+| **Agent-aware** | per-pane detection (28 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · reopen any past session from Search Everywhere · one-key launch · tab sidebar grouped by repository, with pinned groups |
 | **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` streams a command and exits with its code · `split` · `send` · `wait --until free` · `capture` |
 | **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
 | **Window** | tabs & splits · <kbd>⌘ P</kbd> Search Everywhere · <kbd>⌘ F</kbd> scrollback search · hibernate a tab to free its memory · IME |
@@ -71,7 +71,7 @@ that tells tty7 which session to fork. **Past sessions** are read from the agent
 own history files and listed in Search Everywhere, where <kbd>⏎</kbd> resumes one.
 
 <details>
-<summary>The full support matrix, all twenty-six</summary>
+<summary>The full support matrix, all twenty-eight</summary>
 
 | Agent | Detected | Status · resume | Fork | Past sessions |
 |---|:-:|:-:|:-:|:-:|
@@ -95,12 +95,14 @@ own history files and listed in Search Everywhere, where <kbd>⏎</kbd> resumes 
 | **Crush** | ✓ | ✓ | |  |
 | **Antigravity** | ✓ | ✓ | |  |
 | **Cursor** | ✓ | ✓ | | ✓ |
+| **Empryo** | ✓ | ✓ | |  |
+| **Muse Code** | ✓ | ✓ | |  |
+| **jcode** | ✓ | ✓ | |  |
 | Aider | ✓ | | |  |
 | Amp | ✓ | | |  |
 | Auggie | ✓ | | |  |
 | Hermes | ✓ | | |  |
 | Vibe | ✓ | | |  |
-| Empryo | ✓ | | |  |
 
 </details>
 

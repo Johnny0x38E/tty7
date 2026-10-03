@@ -982,6 +982,11 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentEmpryo => "Empryo",
+        L10nKey::SettingsAgentJcode => "jcode",
+        L10nKey::SettingsAgentMuse => "Muse Code",
+        L10nKey::SettingsMuseManualInstall => "Требуется ручная установка",
+        L10nKey::AppAgentHooksMuseManualInstall => "Выполните на удалённом компьютере: {command}",
         L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "прокси сеть загрузка обновление proxy http https socks socks5 clash v2ray network download update"
@@ -1161,6 +1166,15 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchAntigravityKeywords => {
             "агент интеграция хуки установка agent integration hooks install antigravity agy google"
+        }
+        L10nKey::SettingsSearchEmpryoKeywords => {
+            "агент интеграция хуки установка empryo agent integration hooks install"
+        }
+        L10nKey::SettingsSearchJcodeKeywords => {
+            "агент интеграция хуки установка jcode agent integration hooks install"
+        }
+        L10nKey::SettingsSearchMuseKeywords => {
+            "агент интеграция хуки плагины установка muse meta agent integration hooks plugins install"
         }
         L10nKey::SettingsSearchQoderCnKeywords => {
             "агент интеграция хуки установка китайский agent integration hooks install qodercn qoderclicn qoder-cn qoder china"

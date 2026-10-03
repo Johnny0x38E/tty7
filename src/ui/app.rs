@@ -8590,6 +8590,10 @@ impl Tty7App {
         use crate::core::agent_hooks::HookOutcome as O;
         match outcome {
             O::Installed => t(L10nKey::AppAgentHooksInstalled).to_string(),
+            O::MuseInstallManually(command) => t_fmt(
+                L10nKey::AppAgentHooksMuseManualInstall,
+                &[("command", command)],
+            ),
             O::InstalledEnableCodexThere => {
                 t(L10nKey::AppAgentHooksInstalledEnableCodexThere).to_string()
             }

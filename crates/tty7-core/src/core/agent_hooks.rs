@@ -21,6 +21,7 @@ pub fn run_agent_hook(agent: &str, event: &str) {
     if !std::io::stdin().is_terminal() {
         let _ = std::io::stdin().take(MAX_STDIN).read_to_string(&mut input);
     }
+    let input = hook_payload(agent, input, |k| std::env::var(k).ok());
     let Some(event) = effective_event(agent, event, &input) else {
         return;
     };
@@ -64,6 +65,20 @@ fn detach_console() {
 
 #[cfg(unix)]
 fn detach_console() {}
+
+/// The event's payload: what the agent wrote on stdin, or — for jcode, which
+/// leaves stdin closed and describes the event in its environment instead —
+/// the JSON mirror it exports as `JCODE_HOOK_PAYLOAD` (`session_id`, `cwd`,
+/// and the event's own fields).
+fn hook_payload(agent: &str, stdin: String, env: impl Fn(&str) -> Option<String>) -> String {
+    if agent == "jcode"
+        && stdin.trim().is_empty()
+        && let Some(payload) = env("JCODE_HOOK_PAYLOAD").filter(|p| !p.trim().is_empty())
+    {
+        return payload;
+    }
+    stdin
+}
 
 fn effective_agent(agent: &str, ran_by_grok: bool) -> &str {
     if ran_by_grok { "grok" } else { agent }
@@ -602,10 +617,13 @@ pub enum HookAgent {
     PrimeAgent,
     Antigravity,
     QoderCLICn,
+    Empryo,
+    Jcode,
+    Muse,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 20] = [
+    pub const ALL: [HookAgent; 23] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -626,6 +644,9 @@ impl HookAgent {
         HookAgent::Cursor,
         HookAgent::PrimeAgent,
         HookAgent::Antigravity,
+        HookAgent::Empryo,
+        HookAgent::Jcode,
+        HookAgent::Muse,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -645,6 +666,9 @@ impl HookAgent {
             CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
             CLIAgent::PrimeAgent => Some(HookAgent::PrimeAgent),
             CLIAgent::Antigravity => Some(HookAgent::Antigravity),
+            CLIAgent::Empryo => Some(HookAgent::Empryo),
+            CLIAgent::Jcode => Some(HookAgent::Jcode),
+            CLIAgent::Muse => Some(HookAgent::Muse),
             CLIAgent::Gemini => Some(HookAgent::Gemini),
             CLIAgent::Droid => Some(HookAgent::Droid),
             CLIAgent::Qwen => Some(HookAgent::Qwen),
@@ -659,8 +683,7 @@ impl HookAgent {
             | CLIAgent::Amp
             | CLIAgent::Auggie
             | CLIAgent::Hermes
-            | CLIAgent::Vibe
-            | CLIAgent::Empryo => None,
+            | CLIAgent::Vibe => None,
         }
     }
 
@@ -676,6 +699,8 @@ impl HookAgent {
             HookAgent::Droid => Some(DROID_HOOK_EVENTS),
             HookAgent::Qwen => Some(QWEN_HOOK_EVENTS),
             HookAgent::QoderCLI | HookAgent::QoderCLICn => Some(QODER_HOOK_EVENTS),
+            HookAgent::Empryo => Some(EMPRYO_HOOK_EVENTS),
+            HookAgent::Jcode => Some(JCODE_HOOK_EVENTS),
             HookAgent::Crush => Some(CRUSH_HOOK_EVENTS),
             HookAgent::CodeBuddy => Some(CODEBUDDY_HOOK_EVENTS),
             HookAgent::Cursor => Some(CURSOR_HOOK_EVENTS),
@@ -687,7 +712,8 @@ impl HookAgent {
             | HookAgent::PrimeAgent
             | HookAgent::Antigravity
             | HookAgent::Goose
-            | HookAgent::Kimi => None,
+            | HookAgent::Kimi
+            | HookAgent::Muse => None,
         }
     }
 
@@ -744,6 +770,9 @@ impl HookAgent {
             HookAgent::OhMyPi => "omp",
             HookAgent::PrimeAgent => "prime-agent",
             HookAgent::Antigravity => "antigravity",
+            HookAgent::Empryo => "empryo",
+            HookAgent::Jcode => "jcode",
+            HookAgent::Muse => "muse",
             HookAgent::Gemini => "gemini",
             HookAgent::Droid => "droid",
             HookAgent::Qwen => "qwen",
@@ -769,6 +798,9 @@ impl HookAgent {
             HookAgent::OhMyPi => "Oh My Pi",
             HookAgent::PrimeAgent => "Prime Agent",
             HookAgent::Antigravity => "Antigravity",
+            HookAgent::Empryo => "Empryo",
+            HookAgent::Jcode => "jcode",
+            HookAgent::Muse => "Muse Code",
             HookAgent::Gemini => "Gemini",
             HookAgent::Droid => "Droid",
             HookAgent::Qwen => "Qwen Code",
@@ -801,6 +833,17 @@ impl HookAgent {
                 target.under_home(&[".prime", "agent", "extensions", "tty7", "index.ts"])
             }
             HookAgent::Antigravity => target.under_home(&[".gemini", "config", "hooks.json"]),
+            HookAgent::Empryo => target.under_home(&[".empryo", "hooks.json"]),
+            HookAgent::Jcode => target.jcode_config_path(),
+            HookAgent::Muse => target.under_home(&[
+                ".local",
+                "share",
+                "tty7",
+                "agent-hooks",
+                "muse",
+                ".muse-plugin",
+                "plugin.json",
+            ]),
             HookAgent::Grok => target.under_home(&[".grok", "hooks", OWNED_FILE_STEM_JSON]),
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
@@ -937,6 +980,15 @@ impl<'a> HookTarget<'a> {
             return PathBuf::from(dir);
         }
         self.under_home(&[".config"])
+    }
+
+    fn jcode_config_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("JCODE_HOME").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("config.toml");
+        }
+        self.under_home(&[".jcode", "config.toml"])
     }
 
     fn kimi_config_path(&self) -> PathBuf {
@@ -1081,8 +1133,14 @@ pub enum HooksState {
 
 pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
     let path = agent.target_path(target);
+    if agent == HookAgent::Muse {
+        return muse_hooks_state(target);
+    }
     if agent == HookAgent::Antigravity {
         return named_hook_set_state(target, &path, &antigravity_hook_set(target));
+    }
+    if agent == HookAgent::Jcode {
+        return jcode_hooks_state(target, &path);
     }
     if let Some(events) = agent.toml_hook_events() {
         return toml_hooks_state(target, &path, agent, events);
@@ -1109,6 +1167,8 @@ pub enum HookOutcome {
     /// Installed on a remote, where `codex features enable hooks` still has to
     /// be run once by hand.
     InstalledEnableCodexThere,
+    /// Bundle prepared on a remote; its own Muse CLI must install and approve it.
+    MuseInstallManually(String),
     /// Installed, but running `codex features enable hooks` here failed.
     InstalledCodexEnableFailed(String),
     Removed,
@@ -1120,8 +1180,15 @@ pub enum HookOutcome {
 
 pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
+    if agent == HookAgent::Muse {
+        return muse_hooks_install(target, &path);
+    }
     if agent == HookAgent::Antigravity {
         named_hook_set_install(target, &path, antigravity_hook_set(target))?;
+        return Ok(HookOutcome::Installed);
+    }
+    if agent == HookAgent::Jcode {
+        jcode_hooks_install(target, &path)?;
         return Ok(HookOutcome::Installed);
     }
     if let Some(events) = agent.toml_hook_events() {
@@ -1149,8 +1216,14 @@ pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<Ho
 
 pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
+    if agent == HookAgent::Muse {
+        return muse_hooks_uninstall(target, &path);
+    }
     if agent == HookAgent::Antigravity {
         return named_hook_set_uninstall(target, &path);
+    }
+    if agent == HookAgent::Jcode {
+        return jcode_hooks_uninstall(target, &path);
     }
     if agent.toml_hook_events().is_some() {
         return toml_hooks_uninstall(target, &path, agent);
@@ -1268,6 +1341,16 @@ const GEMINI_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionEnd", "session-end"),
 ];
 
+/// Empryo uses Claude-compatible lifecycle hooks in ~/.empryo/hooks.json.
+const EMPRYO_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("StopFailure", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
 const DROID_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
@@ -1288,6 +1371,18 @@ const QWEN_HOOK_EVENTS: &[(&str, &str)] = &[
     ("PostToolUse", "tool-complete"),
     ("Stop", "stop"),
     ("SessionEnd", "session-end"),
+];
+
+/// jcode's lifecycle keys under `[hooks]` in its `config.toml`, each holding
+/// one command or an ordered list of them. jcode runs these as detached
+/// observers and describes the event in `JCODE_HOOK_*` environment variables
+/// rather than on stdin — see [`hook_payload`].
+const JCODE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("turn_start", "prompt-submit"),
+    ("turn_end", "stop"),
+    ("session_start", "session-start"),
+    ("session_end", "session-end"),
+    ("post_tool", "tool-complete"),
 ];
 
 /// Kimi Code's hooks live as `[[hooks]]` entries in its main `config.toml` —
@@ -1566,6 +1661,318 @@ fn marker_hook<'a>(entry: &'a serde_json::Value, marker: &str) -> Option<&'a ser
         .and_then(|h| h.as_array())?
         .iter()
         .find(|h| ours(h))
+}
+
+const MUSE_PLUGIN_ID: &str = "tty7-presence";
+const MUSE_HOOK_EVENTS: &[(&str, &str, &str)] = &[
+    ("session-start", "SessionStart", "session-start"),
+    ("prompt-submit", "UserPromptSubmit", "prompt-submit"),
+    (
+        "permission-request",
+        "PermissionRequest",
+        "permission-request",
+    ),
+    ("tool-complete", "PostToolUse", "tool-complete"),
+    ("stop", "Stop", "stop"),
+    ("stop-failure", "StopFailure", "stop"),
+    ("interrupt", "Interrupt", "stop"),
+    ("session-end", "SessionEnd", "session-end"),
+];
+
+fn muse_plugin_manifest(target: &HookTarget) -> serde_json::Value {
+    let hooks: Vec<_> = MUSE_HOOK_EVENTS
+        .iter()
+        .map(|(id, event, tty7_event)| {
+            serde_json::json!({
+                "id": id, "event": event,
+                "command": [target.exe.to_string_lossy(), "agent-hook", "muse", tty7_event],
+                "timeoutMs": 5000, "async": *event == "Interrupt",
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schemaVersion": 1, "name": MUSE_PLUGIN_ID, "displayName": "tty7 presence",
+        "version": "1.0.0", "description": "tty7 agent-hook muse presence",
+        "compat": {"source": "native", "manifestDir": ".muse-plugin"},
+        "capabilities": {"hooks": hooks},
+    })
+}
+
+/// Muse's native CLI owns its cache and approval records; do not write those directly.
+fn muse_cli(args: &[String]) -> anyhow::Result<serde_json::Value> {
+    let mut cmd = std::process::Command::new("muse");
+    cmd.env("MUSE_NO_AUTO_UPDATE", "1")
+        .args(["plugins"])
+        .args(args)
+        .arg("--json");
+    // Settings and `tty7 doctor` both wait on this; a Muse that hangs (a
+    // login prompt, a stuck update check) must not take either down with it.
+    let out = crate::core::proc::output_within(
+        crate::core::proc::hide_console(&mut cmd),
+        std::time::Duration::from_secs(30),
+    )?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "muse plugins {} failed ({}): {}",
+            args.first().map(String::as_str).unwrap_or(""),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(serde_json::from_slice(&out.stdout)?)
+}
+
+fn muse_inspected_state(target: &HookTarget, inspected: &serde_json::Value) -> HooksState {
+    if inspected["plugin"]["id"] != MUSE_PLUGIN_ID {
+        return HooksState::NotInstalled;
+    }
+    let expected = muse_plugin_manifest(target);
+    let complete = inspected["active"] == true
+        && inspected["valid"] == true
+        && expected["capabilities"]["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hook| {
+                let declared = inspected["plugin"]["capabilities"]["hooks"]
+                    .as_array()
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|installed| {
+                            installed["id"] == hook["id"]
+                                && installed["event"] == hook["event"]
+                                && installed["command"] == hook["command"]
+                                && installed["async"] == hook["async"]
+                        })
+                    });
+                let approved =
+                    inspected["runtime_capabilities"]
+                        .as_array()
+                        .is_some_and(|entries| {
+                            entries.iter().any(|entry| {
+                                entry["candidate"]["kind"] == "hook"
+                                    && entry["candidate"]["capability_id"] == hook["id"]
+                                    && entry["status"] == "trusted_enabled"
+                            })
+                        });
+                declared && approved
+            });
+    if complete {
+        HooksState::Installed
+    } else {
+        HooksState::Outdated
+    }
+}
+
+fn muse_hooks_state(target: &HookTarget) -> HooksState {
+    // A source bundle alone is not an installed plugin. Host has no remote exec API.
+    if !target.is_local() {
+        return HooksState::NotInstalled;
+    }
+    muse_cli(&["inspect".into(), MUSE_PLUGIN_ID.into()])
+        .map(|value| muse_inspected_state(target, &value))
+        .unwrap_or(HooksState::NotInstalled)
+}
+
+fn muse_install_commands(bundle: &Path) -> String {
+    format!(
+        "muse plugins install \"{}\" --scope user && muse plugins approve {MUSE_PLUGIN_ID} && muse plugins enable {MUSE_PLUGIN_ID}",
+        bundle.display()
+    )
+}
+
+fn muse_install_with(
+    target: &HookTarget,
+    path: &Path,
+    mut run: impl FnMut(&[String]) -> anyhow::Result<serde_json::Value>,
+) -> anyhow::Result<HookOutcome> {
+    let bundle = path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("invalid Muse bundle path"))?;
+    let content = serde_json::to_string_pretty(&muse_plugin_manifest(target))?;
+    owned_file_install(target, path, &content, &HookAgent::Muse.marker())?;
+    if !target.is_local() {
+        return Ok(HookOutcome::MuseInstallManually(muse_install_commands(
+            bundle,
+        )));
+    }
+    run(&[
+        "install".into(),
+        bundle.to_string_lossy().into_owned(),
+        "--scope".into(),
+        "user".into(),
+    ])?;
+    run(&["approve".into(), MUSE_PLUGIN_ID.into()])?;
+    run(&["enable".into(), MUSE_PLUGIN_ID.into()])?;
+    let inspected = run(&["inspect".into(), MUSE_PLUGIN_ID.into()])?;
+    if muse_inspected_state(target, &inspected) != HooksState::Installed {
+        anyhow::bail!("Muse plugin was not activated; inspect {MUSE_PLUGIN_ID} before retrying");
+    }
+    Ok(HookOutcome::Installed)
+}
+
+fn muse_hooks_install(target: &HookTarget, path: &Path) -> anyhow::Result<HookOutcome> {
+    muse_install_with(target, path, muse_cli)
+}
+
+fn muse_hooks_uninstall(target: &HookTarget, path: &Path) -> anyhow::Result<HookOutcome> {
+    if !target.is_local() {
+        return Ok(HookOutcome::MuseInstallManually(format!(
+            "muse plugins remove {MUSE_PLUGIN_ID}"
+        )));
+    }
+    if muse_hooks_state(target) != HooksState::NotInstalled {
+        muse_cli(&["remove".into(), MUSE_PLUGIN_ID.into()])?;
+    }
+    owned_file_uninstall(target, path, &HookAgent::Muse.marker())
+}
+
+/// jcode accepts either one command or an ordered list (HookCommands).
+fn jcode_commands(item: &toml_edit::Item) -> anyhow::Result<Vec<String>> {
+    if let Some(command) = item.as_str() {
+        return Ok(vec![command.to_owned()]);
+    }
+    if let Some(array) = item.as_array() {
+        return array
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    anyhow::anyhow!("jcode hook commands must be strings; not touching it")
+                })
+            })
+            .collect();
+    }
+    anyhow::bail!("jcode hook must be a string or an array of strings; not touching it")
+}
+
+fn set_jcode_commands(table: &mut toml_edit::Table, key: &str, commands: &[String]) {
+    match commands {
+        [] => {
+            table.remove(key);
+        }
+        [command] => {
+            table[key] = toml_edit::value(command.clone());
+        }
+        _ => {
+            let mut array = toml_edit::Array::new();
+            for command in commands {
+                array.push(command.as_str());
+            }
+            table[key] = toml_edit::value(array);
+        }
+    }
+}
+
+fn jcode_hooks_state(target: &HookTarget, path: &Path) -> HooksState {
+    let Ok(text) = target.read(path) else {
+        return HooksState::NotInstalled;
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return HooksState::NotInstalled;
+    };
+    let Some(table) = doc.get("hooks").and_then(|item| item.as_table()) else {
+        return HooksState::NotInstalled;
+    };
+    let marker = HookAgent::Jcode.marker();
+    let commands: Vec<_> = JCODE_HOOK_EVENTS
+        .iter()
+        .map(|(key, _)| {
+            table
+                .get(*key)
+                .map(jcode_commands)
+                .transpose()
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        })
+        .collect();
+    let ours = commands
+        .iter()
+        .flatten()
+        .any(|command| command.contains(&marker));
+    let complete = JCODE_HOOK_EVENTS
+        .iter()
+        .zip(&commands)
+        .all(|((_, event), list)| {
+            let expected = target.hook_command(HookAgent::Jcode, event);
+            let marked: Vec<_> = list
+                .iter()
+                .filter(|command| command.contains(&marker))
+                .collect();
+            marked.len() == 1 && marked[0] == &expected
+        });
+    if complete {
+        HooksState::Installed
+    } else if ours {
+        HooksState::Outdated
+    } else {
+        HooksState::NotInstalled
+    }
+}
+
+fn jcode_hooks_install(target: &HookTarget, path: &Path) -> anyhow::Result<()> {
+    let mut doc: toml_edit::DocumentMut = match target.read(path) {
+        Ok(text) => text.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "{} is not valid TOML ({e}); not touching it",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+    let hooks = doc.entry("hooks").or_insert(toml_edit::table());
+    let table = hooks.as_table_mut().ok_or_else(|| {
+        anyhow::anyhow!("{} hooks is not a table; not touching it", path.display())
+    })?;
+    let marker = HookAgent::Jcode.marker();
+    for (key, event) in JCODE_HOOK_EVENTS {
+        let mut commands = table
+            .get(*key)
+            .map(jcode_commands)
+            .transpose()?
+            .unwrap_or_default();
+        commands.retain(|command| !command.contains(&marker));
+        commands.push(target.hook_command(HookAgent::Jcode, event));
+        set_jcode_commands(table, key, &commands);
+    }
+    target.write(path, doc.to_string().as_bytes())
+}
+
+fn jcode_hooks_uninstall(target: &HookTarget, path: &Path) -> anyhow::Result<HookOutcome> {
+    let text = match target.read(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HookOutcome::NothingInstalled),
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "{} is not valid TOML ({e}); not touching it",
+            path.display()
+        )
+    })?;
+    let Some(table) = doc.get_mut("hooks").and_then(|v| v.as_table_mut()) else {
+        return Ok(HookOutcome::NoTty7Hooks);
+    };
+    let marker = HookAgent::Jcode.marker();
+    let mut removed = false;
+    for (key, _) in JCODE_HOOK_EVENTS {
+        let Some(item) = table.get(*key) else {
+            continue;
+        };
+        let mut commands = jcode_commands(item)?;
+        let before = commands.len();
+        commands.retain(|command| !command.contains(&marker));
+        if commands.len() != before {
+            set_jcode_commands(table, key, &commands);
+            removed = true;
+        }
+    }
+    if !removed {
+        return Ok(HookOutcome::NoTty7Hooks);
+    }
+    target.write(path, doc.to_string().as_bytes())?;
+    Ok(HookOutcome::Removed)
 }
 
 fn toml_hooks_state(
@@ -1873,7 +2280,10 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::CodeBuddy
         | HookAgent::Cursor
         | HookAgent::Antigravity
-        | HookAgent::Kimi => None,
+        | HookAgent::Kimi
+        | HookAgent::Empryo
+        | HookAgent::Jcode
+        | HookAgent::Muse => None,
     }
 }
 
@@ -2732,6 +3142,8 @@ mod tests {
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
             (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
             (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
+            (HookAgent::Empryo, "/home/me/.empryo/hooks.json"),
+            (HookAgent::Jcode, "/home/me/.jcode/config.toml"),
             (
                 HookAgent::PrimeAgent,
                 "/home/me/.prime/agent/extensions/tty7/index.ts",
@@ -3553,6 +3965,8 @@ mod tests {
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
             (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
             (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
+            (HookAgent::Empryo, "/home/me/.empryo/hooks.json"),
+            (HookAgent::Jcode, "/home/me/.jcode/config.toml"),
         ] {
             assert_eq!(
                 agent.target_path(&target),
@@ -3588,6 +4002,244 @@ mod tests {
             here.hook_command(HookAgent::Claude, "stop"),
             format!("{command_exe} agent-hook claude stop")
         );
+    }
+
+    fn installed_muse_fixture(target: &HookTarget) -> serde_json::Value {
+        let mut hooks = muse_plugin_manifest(target)["capabilities"]["hooks"].clone();
+        for hook in hooks.as_array_mut().unwrap() {
+            let timeout = hook.as_object_mut().unwrap().remove("timeoutMs").unwrap();
+            hook["timeout_ms"] = timeout;
+        }
+        let runtime: Vec<_> = MUSE_HOOK_EVENTS
+            .iter()
+            .map(|(id, _, _)| {
+                serde_json::json!({
+                    "candidate": {"kind": "hook", "capability_id": id}, "status": "trusted_enabled"
+                })
+            })
+            .collect();
+        serde_json::json!({"active": true, "valid": true, "plugin": {"id": MUSE_PLUGIN_ID,
+            "capabilities": {"hooks": hooks}}, "runtime_capabilities": runtime})
+    }
+
+    #[test]
+    fn muse_install_uses_native_cli_and_requires_approved_hooks() {
+        let host = local_host();
+        let dir = std::env::temp_dir().join(format!("tty7-muse-install-{}", std::process::id()));
+        let target = HookTarget {
+            host: &*host,
+            home: dir.clone(),
+            exe: PathBuf::from("/tty7 bin/tty7-app"),
+        };
+        let path = HookAgent::Muse.target_path(&target);
+        let fixture = installed_muse_fixture(&target);
+        let mut calls = Vec::new();
+        let outcome = muse_install_with(&target, &path, |args| {
+            calls.push(args.to_vec());
+            Ok(if args[0] == "inspect" {
+                fixture.clone()
+            } else {
+                serde_json::json!({})
+            })
+        })
+        .unwrap();
+        assert_eq!(outcome, HookOutcome::Installed);
+        let bundle = path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            calls,
+            vec![
+                vec![
+                    "install".to_owned(),
+                    bundle,
+                    "--scope".into(),
+                    "user".into()
+                ],
+                vec!["approve".into(), "tty7-presence".into()],
+                vec!["enable".into(), "tty7-presence".into()],
+                vec!["inspect".into(), "tty7-presence".into()],
+            ]
+        );
+        assert_eq!(
+            muse_inspected_state(&target, &fixture),
+            HooksState::Installed
+        );
+        let mut unapproved = fixture.clone();
+        unapproved["runtime_capabilities"][0]["status"] = "needs_review".into();
+        assert_eq!(
+            muse_inspected_state(&target, &unapproved),
+            HooksState::Outdated
+        );
+        assert!(
+            muse_install_with(&target, &path, |args| {
+                if args[0] == "approve" {
+                    anyhow::bail!("approval failed");
+                }
+                Ok(serde_json::json!({}))
+            })
+            .is_err(),
+            "a failed approval is not reported as installed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn muse_remote_bundle_requires_manual_install_and_preserves_session_ids() {
+        let host = FakeRemote::shared();
+        let dir = std::env::temp_dir().join(format!("tty7-muse-remote-{}", std::process::id()));
+        let target = HookTarget::remote(&*host, dir.clone());
+        let path = HookAgent::Muse.target_path(&target);
+        let outcome = muse_install_with(&target, &path, |_| {
+            panic!("must not run local Muse for a remote")
+        })
+        .unwrap();
+        let HookOutcome::MuseInstallManually(command) = outcome else {
+            panic!("manual installation required");
+        };
+        assert!(command.contains("muse plugins install"));
+        assert!(command.contains("muse plugins approve tty7-presence"));
+        assert_eq!(
+            hooks_state(&target, HookAgent::Muse),
+            HooksState::NotInstalled
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let hooks = manifest["capabilities"]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 8);
+        let interrupt = hooks
+            .iter()
+            .find(|hook| hook["event"] == "Interrupt")
+            .unwrap();
+        assert_eq!(
+            interrupt["async"], true,
+            "Muse admits only asynchronous cancellation hooks"
+        );
+        let permission = hooks
+            .iter()
+            .find(|hook| hook["event"] == "PermissionRequest")
+            .unwrap();
+        assert_eq!(permission["command"][3], "permission-request");
+        let event = round_trip(
+            "muse",
+            "session-start",
+            r#"{"session_id":"muse-session-42","cwd":"/workspace"}"#,
+        );
+        assert_eq!(event.agent, Some(CLIAgent::Muse));
+        assert_eq!(event.session_id.as_deref(), Some("muse-session-42"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empryo_hooks_merge_with_existing_lifecycle_hooks() {
+        let dir = std::env::temp_dir().join(format!("tty7-empryo-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        let path = HookAgent::Empryo.target_path(&target);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"hooks":{"SessionStart":[]}}"#).unwrap();
+        assert_eq!(
+            hooks_state(&target, HookAgent::Empryo),
+            HooksState::NotInstalled
+        );
+        install_hooks(&target, HookAgent::Empryo).expect("install succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::Empryo),
+            HooksState::Installed
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(root["hooks"]["SessionStart"].as_array().unwrap().len() >= 1);
+        assert!(
+            root["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("agent-hook empryo session-end")
+        );
+        install_hooks(&target, HookAgent::Empryo).expect("reinstall succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::Empryo),
+            HooksState::Installed
+        );
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::Empryo).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::Empryo).unwrap(),
+            HookOutcome::NoTty7Hooks
+        );
+        assert!(path.exists(), "uninstall preserves the shared config file");
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root, serde_json::json!({"hooks": {}}));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_jcode_report_reads_its_session_from_the_environment() {
+        let env = |k: &str| {
+            (k == "JCODE_HOOK_PAYLOAD").then(|| {
+                r#"{"event":"session_start","session_id":"j-7","cwd":"/work"}"#.to_string()
+            })
+        };
+        let input = hook_payload("jcode", String::new(), env);
+        let event = round_trip("jcode", "session-start", &input);
+        assert_eq!(event.agent, Some(CLIAgent::Jcode));
+        assert_eq!(event.session_id.as_deref(), Some("j-7"));
+        assert_eq!(event.cwd.as_deref(), Some(Path::new("/work")));
+        // Only jcode is read from there, and stdin still wins when it has
+        // something to say.
+        assert_eq!(hook_payload("claude", String::new(), env), "");
+        assert_eq!(hook_payload("jcode", "{}".into(), env), "{}");
+    }
+
+    #[test]
+    fn jcode_hooks_use_native_config_lifecycle_keys() {
+        let dir = std::env::temp_dir().join(format!("tty7-jcode-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        let path = HookAgent::Jcode.target_path(&target);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[hooks]\nturn_start = \"user-hook\"\n").unwrap();
+        install_hooks(&target, HookAgent::Jcode).expect("install succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::Jcode),
+            HooksState::Installed
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        let commands = jcode_commands(&doc["hooks"]["turn_start"]).unwrap();
+        assert_eq!(
+            commands,
+            vec![
+                "user-hook".to_owned(),
+                target.hook_command(HookAgent::Jcode, "prompt-submit")
+            ]
+        );
+        install_hooks(&target, HookAgent::Jcode).expect("reinstall succeeds");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text,
+            "reinstall adds no duplicates"
+        );
+        assert!(text.contains("agent-hook jcode prompt-submit"));
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::Jcode).unwrap(),
+            HookOutcome::Removed
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("user-hook")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

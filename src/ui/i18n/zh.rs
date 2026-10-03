@@ -805,6 +805,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentCursorCli => "Cursor CLI",
         L10nKey::SettingsAgentPrimeAgent => "Prime Agent",
         L10nKey::SettingsAgentAntigravity => "Antigravity",
+        L10nKey::SettingsAgentEmpryo => "Empryo",
+        L10nKey::SettingsAgentJcode => "jcode",
+        L10nKey::SettingsAgentMuse => "Muse Code",
+        L10nKey::SettingsMuseManualInstall => "需要手动安装",
+        L10nKey::AppAgentHooksMuseManualInstall => "请在目标机器上运行: {command}",
         L10nKey::SettingsAgentQoderCn => "Qoder CN CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
@@ -961,6 +966,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchPrimeAgentKeywords => {
             "Prime Agent agent 集成 扩展 安装 prime prime-agent primeintellect"
         }
+        L10nKey::SettingsSearchEmpryoKeywords => "Empryo agent 集成 钩子 安装 empryo",
+        L10nKey::SettingsSearchJcodeKeywords => "jcode agent 集成 钩子 安装 jcode",
+        L10nKey::SettingsSearchMuseKeywords => "Muse Code agent 集成 钩子 插件 安装 muse meta",
         L10nKey::SettingsSearchAntigravityKeywords => {
             "Antigravity agent 集成 钩子 安装 antigravity agy google"
         }
