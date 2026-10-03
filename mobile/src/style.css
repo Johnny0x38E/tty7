@@ -450,6 +450,70 @@ code {
   overflow: hidden;
 }
 
+/* The desktop sidebar's groups within a workspace. A header is one line the
+   height of a tap target; folded ones stack close, and a group that is open
+   leaves room after its rows so the next header starts a new block. */
+.tgroup:not(.folded) + .tgroup {
+  margin-top: 14px;
+}
+
+.tgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: left;
+}
+
+.tgroup:not(.folded) .tgroup-head {
+  margin-bottom: 4px;
+}
+
+.tgroup-chevron {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ink-2);
+  transform: rotate(90deg);
+  transition: transform 0.2s var(--ease);
+}
+
+.tgroup.folded .tgroup-chevron {
+  transform: none;
+}
+
+.tgroup-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tgroup-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.tgroup.folded .card {
+  display: none;
+}
+
+.tag.current {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
 .remote {
   padding-top: 10px;
 }
