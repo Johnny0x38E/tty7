@@ -1986,11 +1986,29 @@ interface TabRef {
   id: string;
   name: string;
   busy: boolean;
+  /** Split into more than one pane: one of them can be closed alone. */
+  split?: boolean;
 }
 
 function tabRef(ws: WorkspaceView, tab: TabView, name: string): TabRef {
   const busy = tab.panes.some((p) => p.agent && (p.agent.status === "working" || p.agent.status === "waiting"));
-  return { workspace: ws.id, id: tab.id, name, busy };
+  return { workspace: ws.id, id: tab.id, name, busy, split: tab.panes.length > 1 };
+}
+
+/** Closes one pane of a split tab on the machine, asking first: whatever runs
+ * there is ended, and the desktop loses it too. False when it was not
+ * closed: declined, or refused, which `failed` is told. */
+async function closePane(host: Host, place: Place, pane: PaneView, title: string, failed: (message: string) => void) {
+  const what = pane.agent ? `${agentLook(pane.agent.kind).name} and anything else running in it` : "Whatever runs in it";
+  if (!(await confirmSheet(`Close this pane of ${title}?`, `${what} will be stopped, and it closes on ${place?.name ?? host.name} too.`, "Close pane")))
+    return false;
+  try {
+    await api.paneKill(host.id, place?.key ?? null, pane.id);
+    return true;
+  } catch (e) {
+    failed(sentence(errorText(e)));
+    return false;
+  }
 }
 
 /** Closes a tab, asking first when an agent in it is at work. False when it
@@ -2177,6 +2195,13 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
         },
       );
     }
+    if (tab.panes.length > 1)
+      actions.push({
+        label: "Close this pane",
+        icon: "close",
+        danger: true,
+        run: () => void closePane(host, place, pane, name, (message) => closeFailed(name, message)),
+      });
     actions.push({
       label: "Close tab",
       icon: "close",
@@ -2594,6 +2619,19 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           icon: "phone" as const,
           run: toggleTake,
         },
+        ...(tab?.split
+          ? [
+              {
+                label: "Close this pane",
+                icon: "close" as const,
+                danger: true,
+                run: async () => {
+                  // Nothing is left here to watch; the list drops it on its own.
+                  if (await closePane(host, place, pane, tab.name, (message) => showBanner(message))) hostScreen(host);
+                },
+              },
+            ]
+          : []),
         ...(tab
           ? [
               {
@@ -2905,6 +2943,17 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       });
       return true;
     });
+
+    // Whether the program asked for SGR mouse reports (`?1006`), the encoding
+    // a swipe over a full-screen program is reported in; xterm keeps it to
+    // itself. A replay restores it along with the other modes.
+    let sgrMouse = false;
+    const mouseEncoding = (on: boolean) => (params: (number | number[])[]) => {
+      if (params.includes(1006)) sgrMouse = on;
+      return false;
+    };
+    term.parser.registerCsiHandler({ prefix: "?", final: "h" }, mouseEncoding(true));
+    term.parser.registerCsiHandler({ prefix: "?", final: "l" }, mouseEncoding(false));
 
     let handle: number | null = null;
     // Whether keystrokes land: set by a successful open, cleared by anything
@@ -3247,17 +3296,36 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (document.activeElement === typing) typing.blur();
       else typing.focus({ preventScroll: true });
     };
-    typing.addEventListener("focus", () => keyboard.classList.add("on"));
-    typing.addEventListener("blur", () => keyboard.classList.remove("on"));
-
-    // Committed text goes to the pane and the field is emptied again; while
-    // an input method is composing, the field holds the candidate.
-    let imeOpen = false;
-    const flush = () => {
-      if (imeOpen || !typing.value) return;
-      const text = typing.value.replace(/\r?\n/g, "\r");
+    // While the field has the keys the pane's cursor is drawn solid, as a
+    // focused terminal's is, so a tap on the pane shows where typing lands.
+    typing.addEventListener("focus", () => {
+      keyboard.classList.add("on");
+      term.options.cursorInactiveStyle = "block";
+    });
+    typing.addEventListener("blur", () => {
+      keyboard.classList.remove("on");
+      term.options.cursorInactiveStyle = "outline";
       typing.value = "";
-      send(text);
+      typed = "";
+    });
+
+    // Committed text goes to the pane as the field changes; while an input
+    // method is composing, the field holds the candidate and nothing is sent.
+    // The field is not emptied while it has the keys: iOS keeps its own copy
+    // of the text, and a field cleared under it leaves the input method
+    // stuck after the first character it commits. What goes out is the
+    // change since the last send: characters taken off the end as DEL, one
+    // each, then what is new.
+    let imeOpen = false;
+    let typed = "";
+    const flush = () => {
+      if (imeOpen || typing.value === typed) return;
+      const was = Array.from(typed);
+      const now = Array.from(typing.value);
+      let same = 0;
+      while (same < was.length && same < now.length && was[same] === now[same]) same++;
+      typed = typing.value;
+      send("\x7f".repeat(was.length - same) + now.slice(same).join("").replace(/\r?\n/g, "\r"));
     };
     typing.addEventListener("compositionstart", () => (imeOpen = true));
     typing.addEventListener("compositionend", () => {
@@ -3466,6 +3534,38 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       latest.hidden = true;
       requestAnimationFrame(showCursor);
     };
+    // A full-screen program (an agent's full-screen view, less, vim) is on
+    // the alternate screen, which keeps no scrollback: there is nothing here
+    // to scroll, and the program scrolls itself. A swipe over it turns the
+    // mouse wheel, as on the desktop, a notch a row: reported at the finger
+    // to a program that asked for the mouse, arrow keys to one that did not.
+    let wheelPx = 0;
+    let finger = { x: 0, y: 0 };
+    const wheel = (dy: number) => {
+      wheelPx += dy;
+      const row = rowHeight();
+      const notches = Math.trunc(wheelPx / row);
+      if (!notches) return;
+      wheelPx -= notches * row;
+      const up = notches > 0;
+      let notch: string;
+      if (term.modes.mouseTrackingMode === "none") {
+        notch = `\x1b${term.modes.applicationCursorKeysMode ? "O" : "["}${up ? "A" : "B"}`;
+      } else {
+        const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen")?.getBoundingClientRect();
+        const clamp = (n: number, max: number) => Math.min(Math.max(1, n), max);
+        // The pane's own rows: the ones under them here are history.
+        const x = clamp(drawn ? Math.floor(((finger.x - drawn.left) / drawn.width) * term.cols) + 1 : 1, term.cols);
+        const y = clamp(drawn ? Math.floor((finger.y - drawn.top) / row) + 1 : 1, Math.min(paneRows, term.rows));
+        const button = up ? 64 : 65;
+        // The legacy encoding's bytes past 127 would not survive the trip as
+        // text; it is capped there.
+        notch = sgrMouse
+          ? `\x1b[<${button};${x};${y}M`
+          : `\x1b[M${String.fromCharCode(32 + button, 32 + Math.min(x, 95), 32 + Math.min(y, 95))}`;
+      }
+      void input(notch.repeat(Math.abs(notches)));
+    };
     // Moves the view by a distance in pixels. Dragging down goes back in the
     // scrollback.
     const scrollBy = (dy: number) => {
@@ -3477,6 +3577,11 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       const boxRoom = screenEl.scrollHeight - screenEl.clientHeight;
       if ((dy > 0 && screenEl.scrollTop > 0) || (dy < 0 && buf.viewportY >= buf.baseY && screenEl.scrollTop < boxRoom)) {
         screenEl.scrollTop -= dy;
+        return;
+      }
+      if (buf.type === "alternate") {
+        if (frac) setFrac(0);
+        wheel(dy);
         return;
       }
       const row = rowHeight();
@@ -3506,6 +3611,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         if ((e.target as Element).closest?.(".scrollbar")) return (touch = null);
         const t = e.touches[0];
         touch = { x: t.clientX, y: t.clientY, axis: null, samples: [[t.clientY, e.timeStamp]] };
+        finger = { x: t.clientX, y: t.clientY };
+        wheelPx = 0;
       },
       { passive: true },
     );
@@ -3522,6 +3629,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         }
         if (touch.axis !== "y") return;
         e.preventDefault();
+        finger = { x: t.clientX, y: t.clientY };
         const last = touch.samples[touch.samples.length - 1][0];
         pending += t.clientY - last;
         touch.samples.push([t.clientY, e.timeStamp]);
@@ -3917,6 +4025,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         replayed = true;
         loaded();
         term.reset();
+        sgrMouse = false;
       };
       live = false;
       retry.cancel();
