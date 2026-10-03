@@ -19,6 +19,8 @@ use gpui_component::ActiveTheme as _;
 use super::view::{TerminalView, should_show_context_menu};
 use crate::core::config::Config;
 
+mod osc8_underline;
+
 const DIM_OPACITY: f32 = 0.66;
 
 /// How much of the text's own colour a link's underline keeps before the
@@ -54,6 +56,7 @@ pub(super) struct RenderCell {
     match_hit: bool,
     match_current: bool,
     link_hover: bool,
+    osc8_dots: bool,
 }
 
 impl Default for RenderCell {
@@ -74,6 +77,7 @@ impl Default for RenderCell {
             match_hit: false,
             match_current: false,
             link_hover: false,
+            osc8_dots: false,
         }
     }
 }
@@ -252,6 +256,7 @@ fn snapshot_cell(
     if flags.contains(Flags::DIM) {
         rc.fg = dim_fg(rc.fg, bgc, colors.legible_dim);
     }
+    osc8_underline::mark(&mut rc, cell);
     rc
 }
 
@@ -1708,8 +1713,10 @@ fn invert_cursor_cell(
     cell.bg = colors.caret;
     cell.draw_bg = true;
     cell.fg = ink;
+    // Keep the underline's own alpha: an OSC 8 link's held-back dots stay
+    // faint under the caret rather than turning into a full-strength line.
     if let Some(under) = cell.underline_color.as_mut() {
-        *under = ink;
+        *under = ink.opacity(under.a);
     }
     // A wide character's trailing spacer is absorbed into the lead cell's
     // background run by `paint_backgrounds`, so the fill already covers both
@@ -2004,6 +2011,7 @@ impl TerminalElement {
             let row = grid_row as usize * cols;
             for col in start.column.0..=end.column.0.min(cols.saturating_sub(1)) {
                 let cell = &mut buf[row + col];
+                osc8_underline::unmark(cell);
                 cell.link_hover = true;
                 cell.underline_color = link_underline_color(cell, link.armed);
             }
@@ -3882,7 +3890,7 @@ mod tests {
         assert_eq!(a.as_ref(), "界");
     }
 
-    fn test_colors() -> PaintColors {
+    pub(super) fn test_colors() -> PaintColors {
         let fg = Rgb {
             r: 10,
             g: 10,
