@@ -1472,7 +1472,12 @@ impl Tty7App {
                 div().occlude().flex_shrink_0().child(
                     chrome_tile(
                         Button::new("titlebar-right-panel")
-                            .icon(Icon::empty().path("icons/panel-right.svg")),
+                            // Keep the outline fixed; only the panel region's
+                            // fill changes to show whether the panel is visible.
+                            .icon(Icon::empty().path(match panel_open {
+                                true => "icons/panel-right.svg",
+                                false => "icons/panel-right-collapsed.svg",
+                            })),
                         false,
                         cx,
                     )
@@ -2668,7 +2673,7 @@ impl Tty7App {
                     .child(
                         chrome_tile(
                             Button::new("titlebar-expand-sidebar")
-                                .icon(Icon::empty().path("icons/panel-left.svg")),
+                                .icon(Icon::empty().path("icons/panel-left-collapsed.svg")),
                             false,
                             cx,
                         )

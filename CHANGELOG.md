@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derives it from `TITLE_BAR_HEIGHT`, and a test holds the lights to the tile
   line through the next change of bar height.
 
+### Changed
+
+- **Sidebar toggle icons reflect whether the sidebar is visible** — The left
+  and right toggles leave the sidebar region unfilled when collapsed and fill
+  it when expanded, keeping the same outline, stroke weight, and size.
+
 ## [26.9.4] - 2026-09-29
 
 ### Added
