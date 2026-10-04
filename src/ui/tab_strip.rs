@@ -608,8 +608,9 @@ pub(crate) fn chrome_tile_variant_for(selected: bool, cx: &gpui::App) -> ButtonC
 
 pub(crate) const BUTTON_ICON_SCALE: f32 = 0.75;
 
-/// The rail header's icon tiles: 26px boxes with a 6px corner, the glyph a
-/// notch under the toolbar's so the pair sits quieter than the rows below.
+/// Compact tiles for document headers and overlays: 26px boxes with a 6px
+/// corner and a glyph a notch under the toolbar's. Sidebar navigation uses
+/// the full title-bar size so opening a panel does not resize its controls.
 pub(crate) const RAIL_TILE: f32 = 26.;
 
 /// A sidebar row's trailing status dot, and the box it is centred in (wide
@@ -700,15 +701,15 @@ pub(crate) const TAB_OUTER_PAD: f32 = 2.;
 /// A label's hover target reaches this far past its word.
 const TAB_INNER_PAD: f32 = 4.;
 
-/// How wide the two chrome tiles at the trailing end of the title bar are, with
-/// the padding around them.
+/// The panel toggle and its trailing inset. The open panel uses this same
+/// reservation so the title bar never budgets for a second, absent control.
 pub(crate) fn trailing_chrome_tiles_w() -> f32 {
     let trailing_pad = if cfg!(target_os = "macos") {
         tile_trailing_inset()
     } else {
         4.
     };
-    trailing_pad + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
+    trailing_pad + crate::ui::app::TILE_SIZE
 }
 
 /// The whole trailing cluster: those tiles and the OS window buttons beyond
@@ -1459,33 +1460,19 @@ impl Tty7App {
             true => tile_trailing_inset(),
             false => 4.,
         };
-        self.window_chrome_sized(TILE_SIZE, 2., trailing, cx)
-    }
-
-    /// [`Self::window_chrome`] at another size: `tile` px squares, `gap` apart,
-    /// `trailing` px short of the far edge. The right panel's own tab row is
-    /// the one caller that wants other numbers — see
-    /// `right_panel::PANEL_CHROME_TILE`.
-    pub(crate) fn window_chrome_sized(
-        &self,
-        tile: f32,
-        gap: f32,
-        trailing: f32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+        // Opening the panel moves this control to the panel's header on
+        // macOS. Reuse the same tile and inset there: a different hit target
+        // moves the centred glyph even when the icon itself keeps its size.
         let panel_open = self.right_panel_open(cx);
         h_flex()
             .flex_shrink_0()
             .items_center()
-            .gap(px(gap))
             .pr(px(trailing))
             .child(
                 div().occlude().flex_shrink_0().child(
-                    chrome_tile_sized(
+                    chrome_tile(
                         Button::new("titlebar-right-panel")
                             .icon(Icon::empty().path("icons/panel-right.svg")),
-                        tile,
-                        TILE_GLYPH,
                         false,
                         cx,
                     )
@@ -1889,7 +1876,7 @@ impl Tty7App {
     }
 
     /// [`new_tab_button`](Self::new_tab_button) at another tile size — the
-    /// rail's header draws its two tiles at `RAIL_TILE`.
+    /// document header can use a smaller tile without changing the title bar.
     pub(crate) fn new_tab_button_sized(
         &self,
         id: &'static str,
