@@ -481,8 +481,9 @@ pub(crate) mod test_support {
     /// have signing on globally. The two line-ending settings are here for the
     /// same reason: Git for Windows ships `core.autocrlf=true` in its *system*
     /// config, so a fixture built with LF and read back is a fixture whose
-    /// bytes depend on which machine ran the test.
-    pub(crate) const PINS: [&str; 10] = [
+    /// bytes depend on which machine ran the test. A developer's
+    /// `status.showUntrackedFiles=no` would hide the files a test just wrote.
+    pub(crate) const PINS: [&str; 12] = [
         "-c",
         "user.name=tty7 test",
         "-c",
@@ -493,6 +494,8 @@ pub(crate) mod test_support {
         "core.autocrlf=false",
         "-c",
         "core.eol=lf",
+        "-c",
+        "status.showUntrackedFiles=normal",
     ];
 
     /// The same settings, written into `<repo>/.git/config`.

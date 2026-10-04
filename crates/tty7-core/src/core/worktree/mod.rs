@@ -452,8 +452,7 @@ mod tests {
     fn temp_repo(name: &str) -> PathBuf {
         let dir = scratch(name);
         sh(&dir, &["git", "init", "-q"]);
-        sh(&dir, &["git", "config", "user.email", "t@t"]);
-        sh(&dir, &["git", "config", "user.name", "t"]);
+        assert!(crate::core::git::test_support::pin_repo_config(&dir));
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         sh(&dir, &["git", "add", "."]);
         sh(&dir, &["git", "commit", "-q", "-m", "init"]);
