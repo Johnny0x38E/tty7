@@ -58,6 +58,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stacks, one per screen, alongside the modes it already restores, and puts
   them back as they stood where the replay begins, so the pushes and pops the
   replay still carries land on the stack they were written against.
+
+- **A title that only swaps its status mark no longer repaints the window.**
+  An agent that animates its title (Claude Code turns a circle one quadrant at
+  a time) sends a new OSC title every few hundred milliseconds, and each one
+  rebuilt the whole window for a tab that reads the same: the tab never draws
+  the mark. The pane's own title now takes the same `strip_status_mark` reading
+  as the label, so `settle_title` drops such a frame, and a pane-facts delta
+  that leaves everything a tab shows as it was no longer ends in a
+  `cx.notify()` on the root view. A title whose words change still lands as
+  before, so a ticking counter in the title repaints as often as it did.
+
 - **The macOS traffic lights sit on the same line as the tiles beside them.**
   The buttons AppKit draws are 14 points tall and gpui hangs the top of the
   frame `y` points below the window's top edge, so the lights' centre falls

@@ -2900,6 +2900,9 @@ fn on_workspace_deleted(cx: &mut App, client_ws: WorkspaceId) {
 }
 
 pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: LayoutDelta) {
+    // Asked while the mirror still holds the pane as it was.
+    let nothing_shown =
+        crate::ui::machine_mirror::MachineMirrors::delta_changes_nothing_shown(cx, host, &delta);
     crate::ui::machine_mirror::MachineMirrors::apply_delta(cx, host, key, &delta);
     let client_ws = if host.is_local() {
         key.parse::<WorkspaceId>().ok()
@@ -2946,11 +2949,15 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
         return;
     };
-    let window_ok = handle
-        .update(cx, |_, window, cx| {
-            app.update(cx, |app, cx| app.apply_layout_delta(&delta, window, cx))
-        })
-        .unwrap_or(true);
+    // `apply_layout_delta` ends in a `notify()` of the whole window, and for a
+    // pane-facts delta that is all it does. One that changes nothing a tab
+    // shows (an agent's spinner turning a quarter) has no use for the repaint.
+    let window_ok = nothing_shown
+        || handle
+            .update(cx, |_, window, cx| {
+                app.update(cx, |app, cx| app.apply_layout_delta(&delta, window, cx))
+            })
+            .unwrap_or(true);
     if !mirror_ok || !window_ok {
         log::info!(
             "workspace {client_ws}: delta {delta:?} did not apply cleanly; re-pulling the tree"

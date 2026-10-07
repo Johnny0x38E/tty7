@@ -693,7 +693,9 @@ const AGENT_DONE_SETTLE: std::time::Duration = std::time::Duration::from_millis(
 #[derive(Debug, PartialEq, Eq)]
 enum TitleSettle {
     /// The tab already reads this, so whatever was waiting to replace it never
-    /// has to happen. This is the case a short command lands in.
+    /// has to happen. This is the case a short command lands in, and the one an
+    /// agent's spinner lands in: a frame that only changes the status mark in
+    /// front of the title reads the same on the tab, so it asks for no repaint.
     Revert,
     /// Hold it: a wait is already running and adopts the newest title when it
     /// elapses. Restarting the wait instead would let a program that rewrites
@@ -705,7 +707,7 @@ enum TitleSettle {
 }
 
 fn settle_title(showing: &str, waiting: bool, incoming: &str) -> TitleSettle {
-    if incoming == showing {
+    if tty7_core::core::tab_view::same_title_ignoring_status_mark(incoming, showing) {
         return TitleSettle::Revert;
     }
     match waiting {
@@ -8807,6 +8809,39 @@ mod tests {
         assert_eq!(
             settle_title("~/dev", false, "wget 1%"),
             TitleSettle::QueueAndWait
+        );
+    }
+
+    #[test]
+    fn a_spinner_frame_that_only_changes_the_status_mark_asks_for_no_repaint() {
+        // An agent rewrites its title every few hundred milliseconds while it
+        // works, and the tab never draws the mark, so none of these may wait
+        // and repaint the whole window for the same label.
+        assert_eq!(
+            settle_title(
+                "\u{25D0} fixing the switcher",
+                false,
+                "\u{25D1} fixing the switcher"
+            ),
+            TitleSettle::Revert
+        );
+        assert_eq!(
+            settle_title(
+                "\u{25D0} fixing the switcher",
+                true,
+                "\u{2733} fixing the switcher"
+            ),
+            TitleSettle::Revert,
+            "and a frame that lands while another title waits drops it, as a revert does"
+        );
+        assert_eq!(
+            settle_title(
+                "\u{25D0} fixing the switcher",
+                false,
+                "\u{25D1} fixing the parser"
+            ),
+            TitleSettle::QueueAndWait,
+            "a different title still lands"
         );
     }
 

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use gpui::{App, Global};
 use tty7_core::core::group_key::AutoKey;
 use tty7_core::core::machine::{LayoutDelta, Machine, PaneRecord, Tab, TabId, Workspace};
+use tty7_core::core::tab_view::same_title_ignoring_status_mark;
 use tty7_core::daemon::control::{ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
@@ -132,6 +133,21 @@ impl MachineMirrors {
     pub fn install(cx: &mut App, host: HostId, machine: Machine) {
         cx.default_global::<Self>().machines.insert(host, machine);
         cx.refresh_windows();
+    }
+
+    /// Whether `delta` only says again what a pane's tab already shows.
+    ///
+    /// Asked before [`Self::apply_delta`], which overwrites the record this
+    /// compares against. A window has nothing to repaint for such a delta, and
+    /// repainting anyway is what an agent that rewrites its title every few
+    /// hundred milliseconds costs: the whole window rebuilt for the same label.
+    pub fn delta_changes_nothing_shown(cx: &App, host: HostId, delta: &LayoutDelta) -> bool {
+        let LayoutDelta::PaneFacts { pane } = delta else {
+            return false;
+        };
+        Self::machine(cx, host)
+            .and_then(|machine| machine.panes.iter().find(|p| p.id == pane.id))
+            .is_some_and(|old| shows_the_same(old, pane))
     }
 
     pub fn apply_delta(cx: &mut App, host: HostId, key: &str, delta: &LayoutDelta) {
@@ -284,6 +300,26 @@ impl MachineMirrors {
             _ => {}
         });
     }
+}
+
+/// Whether `new` would put anything on screen that the mirror's record of the
+/// same pane does not already show.
+///
+/// The OSC title only has to read the same once its status mark is off, since
+/// a tab never draws the mark. Every other field has to match as it stands,
+/// compared through the record's own equality so that a field added to it later
+/// takes part without anyone remembering to list it here.
+fn shows_the_same(old: &PaneRecord, new: &PaneRecord) -> bool {
+    let titles = match (&old.osc_title, &new.osc_title) {
+        (Some(a), Some(b)) => same_title_ignoring_status_mark(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    titles
+        && PaneRecord {
+            osc_title: new.osc_title.clone(),
+            ..old.clone()
+        } == *new
 }
 
 fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> bool {
@@ -1111,6 +1147,77 @@ mod tests {
             WorkspaceId::new(),
             &LayoutDelta::WorkspaceRenamed { name: None },
         ));
+    }
+
+    /// The question is put to the mirror before the delta lands in it, against
+    /// the record of the same pane, so a pane the mirror has not met, a host it
+    /// does not hold and a delta about anything but a pane's facts all have to
+    /// answer "something may have changed".
+    #[gpui::test]
+    fn a_delta_is_only_old_news_against_the_record_the_mirror_holds(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut known = PaneRecord::new(7);
+            known.osc_title = Some("\u{25D0} fixing the switcher".into());
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: Vec::new(),
+                    panes: vec![known.clone()],
+                },
+            );
+            let facts = |pane: PaneRecord| LayoutDelta::PaneFacts { pane };
+            let asked = |cx: &App, host, delta: &LayoutDelta| {
+                MachineMirrors::delta_changes_nothing_shown(cx, host, delta)
+            };
+
+            let mut frame = known.clone();
+            frame.osc_title = Some("\u{25D1} fixing the switcher".into());
+            assert!(asked(cx, HostId::LOCAL, &facts(frame)), "a turned frame");
+
+            let mut words = known.clone();
+            words.osc_title = Some("\u{25D1} fixing the parser".into());
+            assert!(!asked(cx, HostId::LOCAL, &facts(words)), "new words");
+
+            let stranger = PaneRecord::new(8);
+            assert!(
+                !asked(cx, HostId::LOCAL, &facts(stranger)),
+                "a pane the mirror has not met"
+            );
+            assert!(
+                !asked(cx, HostId(42), &facts(known.clone())),
+                "a host the mirror does not hold"
+            );
+            assert!(
+                !asked(
+                    cx,
+                    HostId::LOCAL,
+                    &LayoutDelta::WorkspaceRenamed { name: None }
+                ),
+                "a delta that is not about a pane's facts"
+            );
+        });
+    }
+
+    #[test]
+    fn a_spinner_frame_is_not_news_but_any_other_change_is() {
+        let mut old = PaneRecord::new(7);
+        old.osc_title = Some("\u{25D0} fixing the switcher".into());
+        let mut next = old.clone();
+        assert!(shows_the_same(&old, &next), "the same record again");
+        next.osc_title = Some("\u{25D1} fixing the switcher".into());
+        assert!(shows_the_same(&old, &next), "only the mark moved");
+        next.osc_title = Some("\u{25D1} fixing the parser".into());
+        assert!(!shows_the_same(&old, &next), "the words changed");
+        next.osc_title = None;
+        assert!(!shows_the_same(&old, &next), "the title was cleared");
+
+        let mut live = old.clone();
+        live.live = true;
+        assert!(!shows_the_same(&old, &live), "a pane that came alive");
+        let mut moved = old.clone();
+        moved.cwd = Some("/elsewhere".into());
+        assert!(!shows_the_same(&old, &moved), "a pane that moved");
     }
 
     #[test]
