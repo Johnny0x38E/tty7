@@ -680,7 +680,29 @@ impl OutputGate {
     }
 }
 
-pub(crate) const OBSERVER_BUDGET: i64 = 8 * 1024 * 1024;
+/// What an observer may have queued and not yet written: the replay it is
+/// charged for on subscribing, which can be a whole ring, and as much again
+/// of live output. Were it only a ring, a full one would leave no room while
+/// its replay is still going out, and the first byte the pane printed in that
+/// time would drop the observer.
+pub(crate) const OBSERVER_BUDGET: i64 = 2 * RING_CAP as i64;
+
+/// What an observer dropped at its budget is told, last on its stream.
+pub(crate) const OBSERVER_BEHIND: &str =
+    "fell behind this pane's output; open it again to catch up";
+
+/// The bytes a message counts against its stream's [`OutputGate`]: charged
+/// when it is queued, credited back by the writer once it is on the wire. The
+/// two sides must use this one measure, or a gate drifts until it throttles a
+/// stream or drops an observer that has nothing queued.
+pub(crate) fn gated_len(msg: &DaemonMsg) -> usize {
+    match msg {
+        DaemonMsg::Output(b) | DaemonMsg::Snapshot(b) => b.len(),
+        // Lifted from the same PTY read as the output around them.
+        DaemonMsg::Image(b) | DaemonMsg::ClipboardWrite(b) => b.len(),
+        _ => 0,
+    }
+}
 
 /// How long the death path will chase a child's exit status before giving up
 /// and reporting `Exited { code: None }`. The pty hits EOF when the last slave
@@ -865,9 +887,23 @@ fn notify(st: &mut PaneState, msg: DaemonMsg) {
     // small, but an agent pane emits AgentStatus often enough that an observer
     // which stopped draining would still queue without bound. Being over the
     // line already disqualifies it; the message is not sized individually.
-    st.observers.retain(|obs| {
-        obs.gate.queued_bytes() < OBSERVER_BUDGET && obs.tx.send(msg.clone()).is_ok()
-    });
+    st.observers.retain(|obs| send_to_observer(obs, &msg, 0));
+}
+
+/// One message to an observer, within its budget. One past it is told why and
+/// let go. Its sender was the stream's last, so the stream then ends, and the
+/// client opens the pane again for a fresh replay instead of watching a
+/// screen that will never move again.
+fn send_to_observer(obs: &Observer, msg: &DaemonMsg, len: usize) -> bool {
+    if obs.gate.queued_bytes() + len as i64 > OBSERVER_BUDGET {
+        let _ = obs.tx.send(DaemonMsg::Error(OBSERVER_BEHIND.to_string()));
+        return false;
+    }
+    if obs.tx.send(msg.clone()).is_err() {
+        return false;
+    }
+    obs.gate.add(len);
+    true
 }
 
 /// Apply a resize to the pane's shared state: seal the replay ring's segment
@@ -998,16 +1034,7 @@ fn fan_out_one(st: &mut PaneState, msg: DaemonMsg, len: usize, gate: &OutputGate
             gate.add(len);
         }
     }
-    st.observers.retain(|obs| {
-        if obs.gate.queued_bytes() + len as i64 > OBSERVER_BUDGET {
-            return false;
-        }
-        if obs.tx.send(msg.clone()).is_err() {
-            return false;
-        }
-        obs.gate.add(len);
-        true
-    });
+    st.observers.retain(|obs| send_to_observer(obs, &msg, len));
 }
 
 /// Fan one PTY read out to the controller and every observer.
@@ -2430,14 +2457,13 @@ impl DaemonPane {
         // this order.
         let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
-        let epoch = attach_subscriber_with_permissions(
+        attach_subscriber_with_permissions(
             &mut st,
             subscriber,
+            &self.gate,
             allow_remote_clipboard_write,
             foreground_command,
-        );
-        self.gate.reset();
-        epoch
+        )
     }
 
     /// Whether something other than the pane's own shell owns the terminal.
@@ -2468,6 +2494,16 @@ impl DaemonPane {
         let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
         observe_subscriber(&mut st, observer, gate, foreground_command)
+    }
+
+    /// A message for one observer alone, such as a refusal of what it sent.
+    /// False once the pane has let it go.
+    pub fn tell_observer(&self, observer_id: u64, msg: DaemonMsg) -> bool {
+        let st = self.state.lock().unwrap();
+        st.observers
+            .iter()
+            .find(|obs| obs.id == observer_id)
+            .is_some_and(|obs| obs.tx.send(msg).is_ok())
     }
 
     pub fn unobserve(&self, observer_id: u64) {
@@ -3137,10 +3173,10 @@ impl ReplayRing {
         }
     }
 
-    fn replay(&self, subscriber: &Sender<DaemonMsg>) {
+    fn replay(&self, send: &mut impl FnMut(DaemonMsg)) {
         for seg in &self.segments {
-            let _ = subscriber.send(DaemonMsg::Size(seg.size));
-            let _ = subscriber.send(DaemonMsg::Snapshot(seg.to_vec()));
+            send(DaemonMsg::Size(seg.size));
+            send(DaemonMsg::Snapshot(seg.to_vec()));
         }
     }
 
@@ -3189,7 +3225,16 @@ fn record_output(st: &mut PaneState, bytes: &[u8]) {
 /// own the terminal right now?", asked of the pty rather than of the pane's
 /// stored state. It gates the prompt report, and that gate is not cosmetic —
 /// see [`replayed_at_prompt`].
-fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_command: bool) {
+fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_command: bool) -> usize {
+    // What the replay queues is charged to the stream's gate like live output,
+    // by the same measure its writer credits back (`gated_len`).
+    let mut queued = 0;
+    let mut send = |msg: DaemonMsg| {
+        let len = gated_len(&msg);
+        if subscriber.send(msg).is_ok() {
+            queued += len;
+        }
+    };
     // Ahead of the ring, not after it: a client that is put into the alternate
     // screen first paints the replayed frames into the buffer they belong to.
     //
@@ -3202,18 +3247,18 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
     // no history to keep it and is left behind when the program exits. What
     // the ring carries always wins on its own terms.
     if let Some(modes) = st.modes.restore_bytes_beyond(&st.ring.modes()) {
-        let _ = subscriber.send(DaemonMsg::Snapshot(modes));
+        send(DaemonMsg::Snapshot(modes));
     }
-    st.ring.replay(subscriber);
+    st.ring.replay(&mut send);
     if st.shell.active {
-        let _ = subscriber.send(DaemonMsg::Prompt {
+        send(DaemonMsg::Prompt {
             active: st.shell.active,
             at_prompt: replayed_at_prompt(st, foreground_command),
             last_exit: st.shell.last_exit_code,
         });
     }
     if st.remote.is_some() {
-        let _ = subscriber.send(DaemonMsg::RemoteContext(st.remote.clone()));
+        send(DaemonMsg::RemoteContext(st.remote.clone()));
     }
     // After the remote context, never before it. A client drops its cwd on
     // every `RemoteContext`, because live that frame means the pane just hopped
@@ -3224,22 +3269,23 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
     // directory for ⌘T or a split to start the new pane in until its next
     // prompt.
     if let Some(cwd) = &st.cwd {
-        let _ = subscriber.send(DaemonMsg::Cwd(cwd.clone()));
+        send(DaemonMsg::Cwd(cwd.clone()));
     }
     if let Some(phase) = &st.ssh_phase {
-        let _ = subscriber.send(DaemonMsg::SshStatus {
+        send(DaemonMsg::SshStatus {
             phase: phase.clone(),
         });
     }
     if st.agent.is_some() {
-        let _ = subscriber.send(DaemonMsg::Agent(st.agent));
+        send(DaemonMsg::Agent(st.agent));
     }
     if st.agent_session.is_some() {
-        let _ = subscriber.send(DaemonMsg::AgentStatus(st.agent_session.clone()));
+        send(DaemonMsg::AgentStatus(st.agent_session.clone()));
     }
     if !st.alive {
-        let _ = subscriber.send(DaemonMsg::Exited { code: st.exit_code });
+        send(DaemonMsg::Exited { code: st.exit_code });
     }
+    queued
 }
 
 /// Whether a replay may tell the client the pane is sitting at a shell prompt.
@@ -3274,7 +3320,7 @@ fn replayed_at_prompt(st: &PaneState, foreground_command: bool) -> bool {
 
 #[cfg(test)]
 fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
-    attach_subscriber_with_permissions(st, subscriber, false, false)
+    attach_subscriber_with_permissions(st, subscriber, &OutputGate::new(), false, false)
 }
 
 /// The one place a pane's clipboard permission is decided. A pane that carries
@@ -3284,16 +3330,21 @@ fn set_clipboard_permission(st: &mut PaneState, controller_says: bool) {
     st.allow_remote_clipboard_write = st.clipboard_write_from_spec.unwrap_or(controller_says);
 }
 
+/// The new controller's gate starts from what its replay queued, under the
+/// state lock: output fanned out after the lock is released is the new
+/// stream's, and a reset done later would wipe its charge.
 fn attach_subscriber_with_permissions(
     st: &mut PaneState,
     subscriber: Sender<DaemonMsg>,
+    gate: &OutputGate,
     allow_remote_clipboard_write: bool,
     foreground_command: bool,
 ) -> u64 {
     st.subscriber_epoch += 1;
     st.lease_watch = false;
     set_clipboard_permission(st, allow_remote_clipboard_write);
-    replay_state(st, &subscriber, foreground_command);
+    gate.reset();
+    gate.add(replay_state(st, &subscriber, foreground_command));
     st.subscriber = Some(subscriber);
     st.subscriber_epoch
 }
@@ -3305,12 +3356,13 @@ fn observe_subscriber(
     foreground_command: bool,
 ) -> u64 {
     st.observer_seq += 1;
-    replay_state(st, &observer, foreground_command);
     // The replay just queued the whole ring into this channel. Charge it, or
     // the first budget check would read zero while a full scrollback is already
     // sitting there unread — an observer that never drains would be allowed a
-    // ring plus a full budget before anyone noticed.
-    gate.add(st.ring.len);
+    // ring plus a full budget before anyone noticed. Its writer credits it back
+    // as it goes out; until it did, a full ring alone was the whole budget, and
+    // the first byte of live output dropped the observer for good.
+    gate.add(replay_state(st, &observer, foreground_command));
     st.observers.push(Observer {
         id: st.observer_seq,
         tx: observer,
@@ -4873,7 +4925,9 @@ mod tests {
         ring.append(b"narrow bytes");
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(100, 24)));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"wide bytes"));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 24)));
@@ -4895,7 +4949,9 @@ mod tests {
         ring.append(b"the new shell's prompt");
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(100, 24)));
         assert!(
             matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"what the dead pane had on it"),
@@ -5173,7 +5229,9 @@ mod tests {
         assert_eq!(ring.segments.len(), 2);
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(100, 24)));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"bytes"));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 30)));
@@ -5193,7 +5251,9 @@ mod tests {
         assert_eq!(ring.len, RING_CAP);
 
         let (tx, rx) = mpsc::channel();
-        ring.replay(&tx);
+        ring.replay(&mut |m| {
+            let _ = tx.send(m);
+        });
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(s)) if s == ws(80, 24)));
     }
 
@@ -6538,7 +6598,7 @@ mod tests {
         st.ring.append(b"\x1b[?1049h\x1b[2Jthe agent's screen");
 
         let (tx, rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, true);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, true);
 
         let replayed = drain(&rx);
         let prompt = replayed
@@ -6579,7 +6639,7 @@ mod tests {
         st.ring.append(b"\x1b[?1049hstranded alt screen");
 
         let (tx, rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, false);
 
         assert!(
             drain(&rx).iter().any(|msg| matches!(
@@ -7000,6 +7060,102 @@ mod tests {
             observer_bytes <= OBSERVER_BUDGET,
             "a stalled observer must never hold more than its budget, held {observer_bytes}"
         );
+    }
+
+    /// A phone opening a pane with a long history: the replay is a full ring,
+    /// which is the whole observer budget. Once the writer has put it on the
+    /// wire, live output must still reach the observer.
+    /// The pane keeps printing while a full ring's replay is still going out
+    /// to the phone; that output is the observer's too.
+    #[test]
+    fn an_observer_still_reading_a_full_ring_replay_gets_live_output() {
+        let mut st = test_state(true);
+        st.ring.append(&vec![b'h'; RING_CAP]);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
+
+        fan_out_output(&mut st, b"tick", Vec::new(), &OutputGate::new());
+        assert_eq!(st.observers.len(), 1, "the observer is still subscribed");
+        assert!(
+            observer_rx
+                .try_iter()
+                .any(|m| matches!(m, DaemonMsg::Output(b) if b == b"tick"))
+        );
+    }
+
+    /// One dropped at its budget hears why, and then its channel closes, so
+    /// its stream ends rather than going quiet for good.
+    #[test]
+    fn an_observer_dropped_at_its_budget_is_told_and_let_go() {
+        let mut st = test_state(true);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
+        drain(&observer_rx);
+
+        let chunk = vec![b'x'; 1024 * 1024];
+        while !st.observers.is_empty() {
+            fan_out_output(&mut st, &chunk, Vec::new(), &OutputGate::new());
+        }
+        let last = observer_rx.try_iter().last();
+        assert!(matches!(last, Some(DaemonMsg::Error(m)) if m == OBSERVER_BEHIND));
+        assert!(matches!(
+            observer_rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_observer_that_drained_a_full_ring_replay_keeps_getting_output() {
+        use std::os::unix::net::UnixStream;
+        let mut st = test_state(true);
+        st.ring.append(&vec![b'h'; RING_CAP]);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        let observer_gate = Arc::new(OutputGate::new());
+        observe_subscriber(&mut st, observer_tx, observer_gate.clone(), false);
+
+        // The daemon's own writer puts the replay on the wire, as for a phone.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let writer =
+            crate::daemon::server::spawn_writer(observer_rx, server, observer_gate.clone());
+        let mut replayed = 0;
+        while replayed < RING_CAP {
+            if let DaemonMsg::Snapshot(b) = DaemonMsg::read(&mut client).unwrap() {
+                replayed += b.len();
+            }
+        }
+        let paid = std::time::Instant::now() + Duration::from_secs(5);
+        while observer_gate.queued_bytes() > 0 && std::time::Instant::now() < paid {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(observer_gate.queued_bytes(), 0, "the replay is paid off");
+
+        let pane_gate = OutputGate::new();
+        fan_out_output(&mut st, b"live", Vec::new(), &pane_gate);
+        assert_eq!(st.observers.len(), 1, "the observer is still subscribed");
+        assert_eq!(
+            DaemonMsg::read(&mut client).unwrap(),
+            DaemonMsg::Output(b"live".to_vec())
+        );
+        st.observers.clear();
+        writer.join().unwrap();
+    }
+
+    /// A controller's gate starts at its replay, so crediting that replay as
+    /// it is written brings the gate back to zero rather than below it.
+    #[test]
+    fn a_controller_gate_is_charged_for_its_replay() {
+        let mut st = test_state(true);
+        st.ring.append(b"screen");
+        let gate = OutputGate::new();
+        gate.add(123);
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, &gate, false, false);
+        assert_eq!(gate.queued_bytes(), b"screen".len() as i64);
+        while let Ok(msg) = rx.try_recv() {
+            gate.sub(gated_len(&msg));
+        }
+        assert_eq!(gate.queued_bytes(), 0);
     }
 
     #[test]
@@ -7589,7 +7745,7 @@ mod tests {
         let mut st = test_state(true);
         st.clipboard_write_from_spec = Some(true);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, false);
         assert!(st.allow_remote_clipboard_write);
 
         // And a profile that says no is not something an attaching client can
@@ -7597,17 +7753,17 @@ mod tests {
         let mut st = test_state(true);
         st.clipboard_write_from_spec = Some(false);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, true, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), true, false);
         assert!(!st.allow_remote_clipboard_write);
 
         // A pane with no spec of its own — everything on a remote
         // `tty7-server` — is exactly as permitted as its controller says.
         let mut st = test_state(true);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, true, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), true, false);
         assert!(st.allow_remote_clipboard_write);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false, false);
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, false);
         assert!(!st.allow_remote_clipboard_write);
     }
 
@@ -7620,7 +7776,13 @@ mod tests {
         let (observer_tx, observer_rx) = mpsc::channel();
         {
             let mut st = state.lock().unwrap();
-            attach_subscriber_with_permissions(&mut st, controller_tx, true, false);
+            attach_subscriber_with_permissions(
+                &mut st,
+                controller_tx,
+                &OutputGate::new(),
+                true,
+                false,
+            );
             observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         }
         drain(&controller_rx);

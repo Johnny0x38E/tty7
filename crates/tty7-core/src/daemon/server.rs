@@ -1261,35 +1261,38 @@ fn stream_observer(
     mut read_stream: Stream,
     write_stream: Stream,
 ) -> anyhow::Result<()> {
+    // The pane holds the channel's only sender, and refusals go through it,
+    // so an observer the pane drops at its budget loses its stream: the writer
+    // runs dry and shuts the read below down, rather than the client sitting
+    // on a connection nothing will ever be sent down again.
     let (tx, rx) = mpsc::channel::<DaemonMsg>();
-    let refusals = tx.clone();
     let gate = Arc::new(crate::daemon::pane::OutputGate::new());
     let observer_id = pane.observe(tx, gate.clone());
     let writer = spawn_writer(rx, write_stream, gate);
 
-    observe_loop(&mut read_stream, &refusals, |request| {
-        pane.observer_lease(observer_id, request)
-    });
+    observe_loop(
+        &mut read_stream,
+        |msg| pane.tell_observer(observer_id, msg),
+        |request| pane.observer_lease(observer_id, request),
+    );
 
     pane.unobserve(observer_id);
-    drop(refusals);
     let _ = writer.join();
     Ok(())
 }
 
 fn observe_loop<R: std::io::Read>(
     read_stream: &mut R,
-    refusals: &mpsc::Sender<DaemonMsg>,
+    mut refuse: impl FnMut(DaemonMsg) -> bool,
     mut lease: impl FnMut(LeaseRequest),
 ) {
     loop {
         match ClientMsg::read(read_stream) {
             Ok(ClientMsg::Lease(request)) => lease(request),
             Ok(ClientMsg::Input(_)) | Ok(ClientMsg::Resize(_)) => {
-                let refused = refusals.send(DaemonMsg::Error(
+                if !refuse(DaemonMsg::Error(
                     "this connection is a read-only observer; attach to write".to_string(),
-                ));
-                if refused.is_err() {
+                )) {
                     break;
                 }
             }
@@ -1390,7 +1393,7 @@ fn run_stream(
 
 const OUTPUT_COALESCE_CAP: usize = 256 * 1024;
 
-fn spawn_writer(
+pub(crate) fn spawn_writer(
     rx: Receiver<DaemonMsg>,
     mut write_stream: Stream,
     gate: Arc<crate::daemon::pane::OutputGate>,
@@ -1423,15 +1426,7 @@ fn spawn_writer(
                 } else {
                     msg
                 };
-                let drained = match &msg {
-                    DaemonMsg::Output(b) => b.len(),
-                    // Image frames are lifted from the same PTY read the gate
-                    // credits, so they must debit it too or the reader stays
-                    // throttled against bytes that already left the queue.
-                    DaemonMsg::Image(b) => b.len(),
-                    DaemonMsg::ClipboardWrite(b) => b.len(),
-                    _ => 0,
-                };
+                let drained = crate::daemon::pane::gated_len(&msg);
                 let write_ok = msg.encode(&mut write_stream).is_ok();
                 if drained > 0 {
                     gate.sub(drained);
@@ -1532,7 +1527,11 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        observe_loop(&mut std::io::Cursor::new(wire), &tx, |_| {});
+        observe_loop(
+            &mut std::io::Cursor::new(wire),
+            |m| tx.send(m).is_ok(),
+            |_| {},
+        );
         drop(tx);
 
         assert!(
@@ -1552,7 +1551,11 @@ mod tests {
     #[test]
     fn the_observer_loop_ends_at_stream_eof() {
         let (tx, rx) = std::sync::mpsc::channel();
-        observe_loop(&mut std::io::Cursor::new(Vec::<u8>::new()), &tx, |_| {});
+        observe_loop(
+            &mut std::io::Cursor::new(Vec::<u8>::new()),
+            |m| tx.send(m).is_ok(),
+            |_| {},
+        );
         drop(tx);
         assert!(rx.try_recv().is_err());
     }
