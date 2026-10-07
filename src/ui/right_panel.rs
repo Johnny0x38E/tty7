@@ -25,17 +25,17 @@ pub(crate) fn shown_tab(tab: RightPanelTab) -> RightPanelTab {
     }
 }
 
-/// Wide enough for the three word tabs, bare, beside the two chrome tiles at
+/// Wide enough for the word tabs, bare, beside the panel toggle at
 /// the default interface size — the Changes count is dropped before a label is
 /// ever cut. A larger UI font raises the floor past this; see
 /// [`right_panel_tabs_floor`].
 pub(crate) const MIN_WIDTH: f32 = 240.;
 
 /// What the tab row needs with the count dropped: the labels, the row's lead,
-/// its 2px gaps, and the chrome tiles at the trailing end.
+/// its 2px gaps, and the panel toggle at the trailing end.
 fn right_panel_tabs_floor(window: &Window, cx: &gpui::App) -> f32 {
     let chrome = match cfg!(target_os = "macos") {
-        true => PANEL_CHROME_W,
+        true => crate::ui::tab_strip::trailing_chrome_tiles_w(),
         false => tile_trailing_inset(),
     };
     (TAB_ROW_LEAD + crate::ui::tab_strip::right_panel_tab_labels_w(window, cx) + chrome).ceil()
@@ -45,20 +45,6 @@ fn right_panel_tabs_floor(window: &Window, cx: &gpui::App) -> f32 {
 /// `CONTENT_INSET`, the edge every row fill below it starts on, and each tab's
 /// click target reaches `TAB_OUTER_PAD` past its pill.
 const TAB_ROW_LEAD: f32 = crate::ui::app::CONTENT_INSET - crate::ui::tab_strip::TAB_OUTER_PAD;
-
-/// The panel toggle and the app menu where they sit in this panel's own tab
-/// row (macOS): 26px tiles, 4px apart, the last one 12px from the panel's
-/// right edge — the edge every row below keeps too.
-///
-/// Smaller than the title bar's 32px `TILE_SIZE` on purpose. The row they
-/// share here is a word-tab row, and a 32px square beside 12.5px labels read
-/// as a toolbar dropped into a list. The toggle's centre stays 55px from the
-/// right edge either way, so it does not jump when the panel opens.
-pub(crate) const PANEL_CHROME_TILE: f32 = 26.;
-pub(crate) const PANEL_CHROME_GAP: f32 = 4.;
-pub(crate) const PANEL_CHROME_TRAIL: f32 = CONTENT_INSET;
-/// Everything those two tiles take, trailing inset included.
-const PANEL_CHROME_W: f32 = PANEL_CHROME_TRAIL + 2. * PANEL_CHROME_TILE + PANEL_CHROME_GAP;
 
 /// How tall the tab row is where it sits below the title bar (Windows and
 /// Linux): the tab's 26px hover pill plus 2px either side. A full title-bar
@@ -582,7 +568,12 @@ impl Tty7App {
                     let row = h_flex()
                         .id("right-panel-titlebar-drag")
                         .flex_none()
-                        .h(px(crate::ui::app::TITLE_BAR_HEIGHT));
+                        .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
+                        // Match TitleBar's content height, including its invisible
+                        // bottom border. Otherwise this row centres the toggle
+                        // half a point below its position in the closed panel.
+                        .border_b_1()
+                        .border_color(cx.theme().transparent);
                     crate::ui::app::window_move_gesture(
                         row,
                         "right-panel-titlebar-drag",
@@ -595,14 +586,10 @@ impl Tty7App {
                     .relative()
                     .children(self.right_panel_tabs(cx))
                     .child(div().flex_1())
-                    // Navigation controls stay visible on both sidebars —
-                    // here at the panel row's smaller size.
-                    .child(self.window_chrome_sized(
-                        PANEL_CHROME_TILE,
-                        PANEL_CHROME_GAP,
-                        PANEL_CHROME_TRAIL,
-                        cx,
-                    ))
+                    // The toggle keeps its title-bar size and trailing inset
+                    // when it moves into this row, so opening the panel does
+                    // not shift the glyph or change its hover target.
+                    .child(self.window_chrome(cx))
                 }))
                 // Only the Files and Search tabs step down 8px. Their first row
                 // is a filled search well whose top edge is the first thing you

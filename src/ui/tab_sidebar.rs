@@ -1757,24 +1757,21 @@ impl Tty7App {
             })
             .child(
                 crate::ui::app::resting_chrome(div().occlude().flex_shrink_0(), chrome_shown)
-                    .child(self.new_tab_button_sized(
-                        "sidebar-add",
-                        crate::ui::tab_strip::RAIL_TILE,
-                        cx,
-                    )),
+                    // These are the same controls as the collapsed title bar's
+                    // pair. Keep their hit targets and glyphs unchanged when
+                    // the sidebar opens, rather than switching to row-sized tiles.
+                    .child(self.new_tab_button("sidebar-add", cx)),
             )
             .child(
                 crate::ui::app::resting_chrome(div().occlude().flex_shrink_0(), chrome_shown)
                     .child(
-                        crate::ui::tab_strip::chrome_tile_sized(
+                        crate::ui::tab_strip::chrome_tile(
                             Button::new("sidebar-collapse")
                                 .icon(Icon::empty().path("icons/panel-left.svg")),
-                            crate::ui::tab_strip::RAIL_TILE,
-                            crate::ui::tab_strip::RAIL_TILE_GLYPH,
                             false,
                             cx,
                         )
-                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .rounded_lg()
                         .accessible_label(t(L10nKey::TabTooltipHideSidebar))
                         .tooltip_element(crate::ui::tab_strip::chord_tooltip(
                             t(L10nKey::TabTooltipHideSidebar),

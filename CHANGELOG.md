@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tty7-….AppImage` and Volta answered `Could not find executable`. Panes now
   start without `ARGV0`. An `env` entry in the config can still set it.
 
+- **Sidebar controls keep their size and alignment when toggled** — New Tab
+  and the left sidebar toggle now use the same title-bar button and icon sizes
+  with the sidebar open or closed. On macOS, the right panel toggle keeps the
+  same trailing inset and vertical centre when it moves into the open panel's
+  header, preventing a position jump during toggling (#1099).
+
 - **The macOS traffic lights sit on the same line as the tiles beside them.**
   The buttons AppKit draws are 14 points tall and gpui hangs the top of the
   frame `y` points below the window's top edge, so the lights' centre falls
@@ -27,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the row: one device pixel on a Retina panel. `traffic_light_position()` now
   derives it from `TITLE_BAR_HEIGHT`, and a test holds the lights to the tile
   line through the next change of bar height.
+
+### Changed
+
+- **Sidebar toggle icons reflect whether the sidebar is visible** — The left
+  and right toggles leave the sidebar region unfilled when collapsed and fill
+  it when expanded, keeping the same outline, stroke weight, and size (#1099).
 
 ## [26.9.4] - 2026-09-29
 
