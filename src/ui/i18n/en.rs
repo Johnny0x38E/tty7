@@ -2340,6 +2340,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::GitHubShowFullText => "Show full text",
         L10nKey::GitHubShowHiddenComments => "Show {count} more comments",
         L10nKey::GitHubShowAllReviewers => "Show all {count} reviewers",
+        L10nKey::CmdCopyRaw => "Copy Raw",
+        L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
+            "clipboard copy wrap unwrap join lines claude raw"
+        }
+        L10nKey::SettingsCopyJoinWrapped => "Join wrapped lines when copying",
+        L10nKey::SettingsCopyJoinWrappedDesc => {
+            "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line. ⌘⌥C or Copy Raw copies them as shown"
+        }
     }
 }
 

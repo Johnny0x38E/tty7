@@ -35,6 +35,8 @@ use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
+mod copy_unwrap;
+
 pub(super) const GRID_PAD_X: f32 = 8.;
 pub(super) const GRID_PAD_Y: f32 = 4.;
 
@@ -2638,6 +2640,10 @@ impl TerminalView {
             return;
         }
 
+        if m.platform && m.alt && !m.control && ks.key == "c" && self.copy_raw(cx) {
+            cx.stop_propagation();
+            return;
+        }
         if m.platform && !m.control && !m.alt {
             match self.handle_cmd_shortcut(ks, window, cx) {
                 CmdKey::Consumed => {
@@ -3554,7 +3560,11 @@ impl TerminalView {
     }
 
     pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        let text = self.terminal.term.lock().selection_to_string();
+        self.copy_selection_as(false, cx);
+    }
+
+    fn copy_selection_as(&mut self, raw: bool, cx: &mut Context<Self>) {
+        let text = copy_unwrap::selection_text(self, raw, cx);
         if let Some(mut text) = text {
             if cx.global::<Config>().clipboard_trim_trailing_spaces {
                 text = trim_trailing_spaces(&text);

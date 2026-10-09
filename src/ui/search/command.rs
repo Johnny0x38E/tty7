@@ -67,6 +67,7 @@ pub enum CommandKind {
     FindNext,
     FindPrevious,
     CopyText,
+    CopyRaw,
     CutText,
     PasteText,
     SelectAllText,
@@ -248,6 +249,7 @@ impl CommandKind {
             FindNext => "find-next",
             FindPrevious => "find-previous",
             CopyText => "copy",
+            CopyRaw => "copy-raw",
             CutText => "cut",
             PasteText => "paste",
             SelectAllText => "select-all",
@@ -326,6 +328,7 @@ impl CommandKind {
             |spec: &str| -> Option<String> { cfg!(target_os = "macos").then(|| spec.to_string()) };
         match self {
             CopyText => return inline("secondary-c"),
+            CopyRaw => return inline("secondary-alt-c"),
             CutText => return inline("secondary-x"),
             PasteText => return inline("secondary-v"),
             SelectAllText => return inline("secondary-a"),
@@ -440,6 +443,7 @@ impl CommandKind {
             ToggleDiffViewMode => "ToggleDiffViewMode",
             QuickOpenFile => "QuickOpenFile",
             CopyText
+            | CopyRaw
             | CutText
             | PasteText
             | SelectAllText
@@ -765,6 +769,7 @@ impl Item {
             Item::localized(L10nKey::CmdFindNext, FindNext),
             Item::localized(L10nKey::CmdFindPrevious, FindPrevious),
             Item::localized(L10nKey::CmdCopy, CopyText),
+            Item::localized(L10nKey::CmdCopyRaw, CopyRaw),
             Item::localized(L10nKey::CmdCut, CutText),
             Item::localized(L10nKey::CmdPaste, PasteText),
             Item::localized(L10nKey::CmdSelectAll, SelectAllText),
@@ -928,6 +933,7 @@ mod tests {
             CommandKind::SplitRight,
             CommandKind::ClearTerminal,
             CommandKind::CopyText,
+            CommandKind::CopyRaw,
             CommandKind::CutText,
             CommandKind::PasteText,
             CommandKind::SelectAllText,

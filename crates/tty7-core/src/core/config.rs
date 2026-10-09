@@ -381,6 +381,10 @@ pub struct Config {
     #[serde(default, deserialize_with = "de_lenient")]
     pub mouse_zoom_modifier: MouseZoomModifier,
     pub clipboard_trim_trailing_spaces: bool,
+    /// In a Claude Code pane, copy joins the rows Claude wrapped itself, so a
+    /// paragraph pastes as one line. ⌘⌥C and Copy Raw copy the rows as is.
+    #[serde(default)]
+    pub copy_join_wrapped: bool,
     pub copy_on_select: bool,
     /// Optional HTTP/SOCKS proxy for tty7's *own* update checks and release
     /// downloads, and (HTTP only) the mobile gateway's relay; when set it is
@@ -854,6 +858,7 @@ impl Default for Config {
             mouse_reporting: true,
             mouse_zoom_modifier: MouseZoomModifier::default(),
             clipboard_trim_trailing_spaces: false,
+            copy_join_wrapped: false,
             copy_on_select: false,
             http_proxy: None,
             smart_select: true,
