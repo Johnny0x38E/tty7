@@ -75,7 +75,13 @@ impl Tk {
         let fg = theme.foreground;
         let page = theme.background;
         let a = |light: f32, dark_a: f32| fg.opacity(if dark { dark_a } else { light });
-        let white = gpui::white();
+        // Light controls sit a step above the page in the theme's own hue, so
+        // a cream theme gets cream fields and a white one stays white. Opaque:
+        // the page carries the window's opacity, a control should not.
+        let raised = Hsla {
+            a: 1.,
+            ..lift(page, 0.035)
+        };
         Self {
             dark,
             fg,
@@ -94,10 +100,10 @@ impl Tk {
             k6: a(0.6, 0.65),
             heading: a(0.9, 0.9),
             nav: a(0.82, 0.8),
-            btn: if dark { fg.opacity(0.1) } else { white },
-            menu: if dark { lift(page, 0.06) } else { white },
-            knob: if dark { fg } else { white },
-            chip: if dark { fg.opacity(0.16) } else { white },
+            btn: if dark { fg.opacity(0.1) } else { raised },
+            menu: if dark { lift(page, 0.06) } else { raised },
+            knob: if dark { fg } else { raised },
+            chip: if dark { fg.opacity(0.16) } else { raised },
             warn: gpui::rgb(0xe0a100).into(),
             warn_text: gpui::rgb(0xb07d00).into(),
             danger: gpui::rgb(0xd93025).into(),
