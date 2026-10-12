@@ -5,9 +5,97 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [26.10.0] - 2026-10-12
+
+### Added
+
+- **A phone companion for live panes.** Pair a phone with the desktop to browse workspaces and operate local or SSH panes over an encrypted peer-to-peer connection. The desktop gateway supports pairing, revocation and pane-size takeover; the separately released phone app adds file and change browsing, a configurable key bar and text selection. (#983, #1029, #1073, #1098)
+
+- **A message composer for agent CLIs.** A multiline composer covers supported agents’ input areas, with command and file completion, attachments and agent-specific controls. It steps aside for the agent’s own dialogs and can be toggled with Cmd+I. (#1066)
+
+- **Worktrees can start ready for an agent.** New Worktree Tab supports ignored files selected by .worktreeinclude, trusted .tty7/setup scripts, an agent and initial task, and stable per-worktree port ranges. Removal snapshots dirty work before discarding it; the tty7 worktree CLI exposes the workflow too. (#1009)
+
+- **Windows remote workspaces.** Remote workspaces can install and run tty7-server on Windows OpenSSH hosts. PowerShell shell integration supplies the remote working-directory and prompt information used by the desktop. (#1041, #1040)
+
+- **Native Windows ARM64 packages.** The release includes a native installer and portable archive for Windows ARM64, alongside the ARM64 remote server. (#1043)
+
+- **More agent integrations.** Muse Code and jcode are supported, with native hooks for Empryo, Muse Code and jcode. (#1071)
+
+- **Russian translation.** The ru-RU locale includes the few/many plural forms used by Russian counts. (#1072)
+
+- **Recently closed tabs and close confirmation.** Recently closed tabs remain available in the machine tree, and closing behavior has a confirmation setting. (#1037)
+
+- **Process resource usage.** Info → Processes shows CPU and memory per process and their totals. The PID column has been removed to leave room for useful process information. (#1064, #1095)
+
+- **Terminal theme and notification protocols.** Programs can receive DEC 2031 light/dark theme reports; kitty OSC 99 notifications follow the configured notification policy. (#1061, #1062)
+
+### Changed
+
+- **CI caches are shared from main.** Documentation-only pull requests skip Rust builds while retaining their required check results; code changes continue to build and test on all supported desktop platforms (#1022).
+
+- **Copy joins Claude Code’s wrapped prose.** Copying text can rejoin the lines Claude Code wrapped itself, with follow-up handling for the boundaries that should remain intact. (#1141, #1149)
+
+- **GitHub panels reuse unchanged responses.** ETag revalidation reduces repeated data transfer, and independent pull-request detail requests run in parallel. (#1117, #1115)
+
+- **OSC 8 links have a visible resting state.** A faint dotted underline identifies terminal hyperlinks even before the pointer reaches them; panes also set FORCE_HYPERLINK=1 for programs that honor it. (#1078, #1025)
+
+- **Title-bar controls and sidebar navigation.** The title-bar search box is centered, auto-hiding title-bar buttons are an Appearance option, Move to Group lists the available groups, and selecting a sidebar tab scrolls only as far as necessary. (#1036, #1063, #1060)
+
+- **Local windows participate in workspace takeover.** A machine’s own desktop window takes part in the same ownership transfer as remote workspace clients. (#1042)
+
+- **Accessible application navigation.** Sidebar tabs, Settings navigation and rows, file-tree entries, Search Everywhere results, Changes groups, icon controls and application dialogs expose names and roles to screen readers.
+
+- **Sidebar toggle icons reflect whether the sidebar is visible** — The left
+  and right toggles leave the sidebar region unfilled when collapsed and fill
+  it when expanded, keeping the same outline, stroke weight, and size (#1099).
 
 ### Fixed
+
+- **Desktop update checks skip phone releases.** When GitHub marks a mobile release as latest, the desktop updater now searches the paginated release list for a stable desktop release with a matching package. Drafts and prereleases are excluded, while the nightly feed remains separate. This fixes the mobile-v0.1.6 “no usable version” failure reported in #1151. (#1156)
+
+- **Recovery preserves live sessions and leaves diagnostics.** A disconnected spawn request probes and recovers the daemon instead of forcing a global restart. Default diagnostics retain rotated runtime, panic and daemon stderr logs, so failures can be investigated after recovery; explicit daemon restarts still terminate sessions. (#1153)
+
+- **Daemon handoffs preserve terminal modes.** The saved replay state now carries the private modes that were enabled before the history ring’s oldest retained bytes, preserving theme reports, alternate screens, mouse reporting and kitty keyboard flags across compatible handoffs. (#1145)
+
+- **Full-screen programs repaint after old output is evicted.** A program whose first screen left the replay ring is asked to repaint when a client attaches, instead of leaving an incomplete screen. (#1136)
+
+- **Remote synchronization does not close unseen panes.** A tab absent from a window is no longer treated as a request to close it on the machine. (#1125)
+
+- **SSH connections recover from an unresponsive peer.** Links that stop answering are detected and redialled; a reconnected pane starts in its previous remote working directory. (#1129, #1035)
+
+- **SFTP failures explain the cause.** SFTP startup reports its failure instead of replacing it with an uninformative timeout. (#1133)
+
+- **Large remote workspaces remain responsive.** Remote workspace handling is more stable when more than ten panes are present. (#1034)
+
+- **SSH credentials and host selection stay consistent.** Password and key-passphrase controls are restored to the SSH host editor. Opening a new tab from an SSH tab stays on that host, and the switcher labels offline hosts explicitly. (#1130, #1031)
+
+- **Remote agent forks and missing resumes.** Agent sessions can be forked in remote workspaces; a Claude resume that cannot find its conversation starts fresh under the intended session ID. (#1016, #1024)
+
+- **Mouse selection and input method positioning.** A double click on the prompt selects the word under the pointer. Wheel reports use the pointer location, and IME composition stays anchored to the caret. (#1143, #1134)
+
+- **Text rendering respects platform settings.** Opaque Windows windows retain ClearType text. On macOS, stroke thickening is controlled in gpui instead of changing AppleFontSmoothing. (#1132, #1135)
+
+- **New and deleted files remain readable in split diffs.** Files with only one side are drawn as a unified diff rather than leaving a misleading empty split. (#1138)
+
+- **Light settings and title-bar alignment.** Light-theme controls use the page’s hue instead of white, traffic-light insets are balanced, and tab-number badges appear with the configured tab chord’s modifier. (#1137, #1139, #1128)
+
+- **Panels and the palette keep their intended behavior.** Clicking a panel’s active tab no longer closes it. Palette workspace keys and Cmd+P from Settings keep working, and global shortcuts recover when application focus is lost. (#1079, #1026, #1023)
+
+- **The empty editor closes before its terminal.** Cmd+W after closing the last editor file closes the empty editor instead of closing the terminal pane. (#1056)
+
+- **Retry controls in the workspace switcher work.** The error band’s Try Again and Dismiss buttons now perform their advertised actions. (#1127)
+
+- **Paths, themes and GitHub text handle more input.** File links can be separated from adjacent CJK labels, integer color components are accepted in .itermcolors files, and a multibyte character after < cannot panic the GitHub Markdown sanitizer. (#1053, #1059, #1076)
+
+- **History pages and sidebar grouping stay stable.** New history pages no longer inherit the previous page’s rows, failed git probes do not ungroup tabs, and long branch names are elided from the end. (#1020, #1011, #1014)
+
+- **Quiet panes stop causing unnecessary redraws.** The terminal’s git retry check no longer redraws the window on every poll tick. (#1015)
+
+- **Phone connections handle proxy and DNS restrictions.** The gateway can reach relays through the configured proxy and resolve them behind DNS servers that set the EDNS Z flag. Frame reads are cancel-safe on slow links. (#1058, #1092, #1093)
+
+- **Phone pairing survives renewal.** Settings can renew pairing codes and explains expired codes; machines use their OS name and recognize a re-paired computer. (#1019, #1097)
+
+- **macOS packaging supports alternate signing setups.** Bundle names, identifiers and paths can be overridden, notarization supports an App Store Connect key, signing is timestamped when notarizing, and temporary key material is removed. (#1067, #1082)
 
 - **Volta shims, and anything else that reads its own argv[0], work again in
   the Linux AppImage** (#1100). The AppImage runtime exports `ARGV0` into
@@ -80,12 +168,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the row: one device pixel on a Retina panel. `traffic_light_position()` now
   derives it from `TITLE_BAR_HEIGHT`, and a test holds the lights to the tile
   line through the next change of bar height.
-
-### Changed
-
-- **Sidebar toggle icons reflect whether the sidebar is visible** — The left
-  and right toggles leave the sidebar region unfilled when collapsed and fill
-  it when expanded, keeping the same outline, stroke weight, and size (#1099).
 
 ## [26.9.4] - 2026-09-29
 
