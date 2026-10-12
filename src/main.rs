@@ -651,8 +651,8 @@ fn main() {
     }
 
     if daemon {
-        if let Err(e) = crate::daemon::server::run_daemon() {
-            log::error!("daemon exited with error: {e}");
+        if crate::daemon::server::run_daemon().is_err() {
+            std::process::exit(1);
         }
         return;
     }
