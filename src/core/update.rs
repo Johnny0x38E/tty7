@@ -1758,6 +1758,22 @@ impl UpdateState {
 struct LatestRelease {
     tag_name: String,
     assets: Vec<GitHubAsset>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+impl LatestRelease {
+    fn is_stable_desktop(&self) -> bool {
+        !self.draft
+            && !self.prerelease
+            && parse_version(&self.tag_name).is_some_and(|version| version.3)
+            && self.assets.iter().any(|asset| {
+                version_from_assets(std::slice::from_ref(asset))
+                    .is_some_and(|version| parse_version(&version) == parse_version(&self.tag_name))
+            })
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -1963,13 +1979,42 @@ async fn fetch_latest_release(
     manual_proxy: Option<String>,
 ) -> Result<(LatestRelease, String)> {
     let client = build_http_client(manual_proxy.as_deref())?;
-    let release: LatestRelease = fetch_json(&client, &release_endpoint(channel))
+    let mut release: LatestRelease = fetch_json(&client, &release_endpoint(channel))
         .await
         .context("requesting the release")?;
+    if channel == UpdateChannel::Stable && !release.is_stable_desktop() {
+        // Mobile releases share this repository and can accidentally be marked
+        // latest when published. Walk past those (and drafts/nightlies), rather
+        // than trying to install a phone app or stranding the desktop updater.
+        release = find_stable_desktop_release(async |page| {
+            fetch_json(
+                &client,
+                &format!("https://api.github.com/repos/{REPO}/releases?per_page=100&page={page}"),
+            )
+            .await
+            .context("requesting desktop releases")
+        })
+        .await?;
+    }
     let version = resolve_version(&client, &release)
         .await
         .with_context(|| format!("release {} advertises no usable version", release.tag_name))?;
     Ok((release, version))
+}
+
+async fn find_stable_desktop_release(
+    mut fetch_page: impl AsyncFnMut(usize) -> Result<Vec<LatestRelease>>,
+) -> Result<LatestRelease> {
+    let mut page = 1;
+    loop {
+        let releases = fetch_page(page).await?;
+        let last_page = releases.len() < 100;
+        if let Some(desktop) = releases.into_iter().find(LatestRelease::is_stable_desktop) {
+            return Ok(desktop);
+        }
+        anyhow::ensure!(!last_page, "no stable desktop release is available");
+        page += 1;
+    }
 }
 
 /// The version a release stands for.
@@ -2990,6 +3035,112 @@ fn is_update_available(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_desktop_fallback_reads_past_a_page_of_mobile_releases() {
+        let mut pages = Vec::new();
+        let release = smol::block_on(find_stable_desktop_release(async |page| {
+            pages.push(page);
+            Ok(if page == 1 {
+                vec![
+                    LatestRelease {
+                        tag_name: "mobile-v0.1.6".into(),
+                        draft: false,
+                        prerelease: false,
+                        assets: vec![github_asset("tty7-0.1.6-android-arm64.apk")],
+                    };
+                    100
+                ]
+            } else {
+                vec![LatestRelease {
+                    tag_name: "v26.9.4".into(),
+                    draft: false,
+                    prerelease: false,
+                    assets: vec![github_asset("tty7-26.9.4-macos-arm64.zip")],
+                }]
+            })
+        }))
+        .unwrap();
+        assert_eq!(pages, [1, 2]);
+        assert_eq!(release.tag_name, "v26.9.4");
+    }
+
+    #[test]
+    fn stable_desktop_fallback_stops_at_the_end_and_propagates_errors() {
+        let absent = smol::block_on(find_stable_desktop_release(async |_| Ok(vec![])));
+        assert!(
+            absent
+                .unwrap_err()
+                .to_string()
+                .contains("no stable desktop release")
+        );
+        let failure = smol::block_on(find_stable_desktop_release(async |_| {
+            anyhow::bail!("GitHub API rate limit exceeded")
+        }));
+        assert!(
+            failure
+                .unwrap_err()
+                .to_string()
+                .contains("rate limit exceeded")
+        );
+    }
+
+    #[test]
+    fn stable_desktop_filter_skips_mobile_drafts_and_nightlies() {
+        let releases: Vec<LatestRelease> = serde_json::from_value(serde_json::json!([
+            {"tag_name": "mobile-v0.1.6", "assets": [
+                {"name": "tty7-0.1.6-android-arm64.apk", "browser_download_url": "https://example.com/mobile"}
+            ]},
+            {"tag_name": "v26.9.6", "draft": true, "assets": [
+                {"name": "tty7-26.9.6-macos-arm64.zip", "browser_download_url": "https://example.com/draft"}
+            ]},
+            {"tag_name": "v26.9.5", "prerelease": true, "assets": [
+                {"name": "tty7-26.9.5-macos-arm64.zip", "browser_download_url": "https://example.com/prerelease"}
+            ]},
+            {"tag_name": "v26.9.5-nightly.20261012", "assets": [
+                {"name": "tty7-26.9.5-nightly.20261012-macos-arm64.zip", "browser_download_url": "https://example.com/nightly"}
+            ]},
+            {"tag_name": "v26.9.4", "draft": false, "prerelease": false, "assets": [
+                {"name": "tty7-26.9.4-macos-arm64.zip", "browser_download_url": "https://example.com/desktop"}
+            ]}
+        ])).unwrap();
+        assert!(
+            releases[..4]
+                .iter()
+                .all(|release| !release.is_stable_desktop())
+        );
+        assert_eq!(
+            releases
+                .iter()
+                .find(|release| release.is_stable_desktop())
+                .unwrap()
+                .tag_name,
+            "v26.9.4"
+        );
+    }
+
+    #[test]
+    fn desktop_release_requires_a_matching_desktop_package() {
+        let mut release = LatestRelease {
+            tag_name: "v26.9.4".into(),
+            draft: false,
+            prerelease: false,
+            assets: vec![],
+        };
+        for name in [
+            "SHA256SUMS",
+            "tty7-server-linux-x86_64-musl",
+            "tty7-26.9.4-android-arm64.apk",
+            "tty7-26.9.3-macos-arm64.zip",
+        ] {
+            release.assets.push(github_asset(name));
+        }
+        assert!(!release.is_stable_desktop());
+        release
+            .assets
+            .push(github_asset("tty7-26.9.4-linux-x86_64.tar.gz"));
+        assert!(release.is_stable_desktop());
+    }
 
     #[test]
     fn github_rate_limit_error_says_when_to_retry() {
