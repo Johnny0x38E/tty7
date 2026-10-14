@@ -5,6 +5,24 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Document and settings headers share the title bar's vertical centre** —
+  Editor, diff, settings, and sidebar header rows reserve the same bottom-edge
+  height, including when a row draws a thinner hairline. Their controls stay
+  on the macOS traffic lights' centre line. The editor also preserves the full
+  leading reserve instead of subtracting the first control's inner padding,
+  keeping its hover area and docked file tabs at the intended inset.
+
+### Changed
+
+- **Document headers share icon switches** — The diff header now exposes
+  Dock / Fill controls alongside Side-by-Side / Unified view icons, using
+  the same switch as the editor. Localized tooltips name each choice, and
+  the selected layout reflects the layout actually displayed.
+
 ## [26.10.0] - 2026-10-12
 
 ### Added
