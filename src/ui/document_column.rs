@@ -238,6 +238,16 @@ where
     let dark = theme.mode.is_dark();
     div()
         .id(id)
+        // The glyph has no text for assistive technology to read. Use the
+        // tooltip's localized name and expose the raised cell as a pressed
+        // button; GPUI also routes accessible clicks to the on_click handler.
+        .role(gpui::Role::Button)
+        .aria_label(t(tip))
+        .aria_toggled(if live {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
         .w(px(SWITCH_CELL_W))
         .h(px(SWITCH_CELL_H))
         .flex()

@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Document headers share icon switches** — The diff header now exposes
   Dock / Fill controls alongside Side-by-Side / Unified view icons, using
-  the same switch as the editor. Localized tooltips name each choice, and
-  the selected layout reflects the layout actually displayed.
+  the same switch as the editor. Localized tooltips and accessible button
+  names identify each choice, and the pressed state reflects the view or
+  layout actually displayed.
 
 ## [26.10.0] - 2026-10-12
 
