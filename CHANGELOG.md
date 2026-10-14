@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Filled document headers share the terminal button** — Both the editor and
+  diff show the current terminal's name in Fill Window. Clicking it docks the
+  document beside the terminal and keeps its content open (#1178).
+
 - **Document headers share icon switches** — The diff header now exposes
   Dock / Fill controls alongside Side-by-Side / Unified view icons, using
   the same switch as the editor. Localized tooltips and accessible button

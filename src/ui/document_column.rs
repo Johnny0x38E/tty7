@@ -17,7 +17,7 @@
 //! document falls back to it for that frame without touching what the user
 //! saved.
 
-use gpui::{AnyElement, Context, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, FontWeight, Window, div, prelude::*, px, rems};
 use gpui_component::{ActiveTheme as _, InteractiveElementExt as _, h_flex, v_flex};
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
@@ -81,6 +81,17 @@ impl DocumentChrome {
         }
     }
 }
+
+/// Document header cells share the editor file strip's dimensions, so the
+/// terminal button looks the same beside file tabs and a diff's subject.
+/// Height of a header cell — a file, the `+N` button, the terminal pill.
+pub(crate) const HEADER_CELL_H: f32 = 28.;
+/// Their corner.
+pub(crate) const HEADER_CELL_RADIUS: f32 = 7.;
+/// The widest a name may make its cell before it is elided.
+pub(crate) const HEADER_CELL_MAX_W: f32 = 168.;
+/// Header text: a half step under the body size, like the rail's rows.
+pub(crate) const HEADER_CELL_TEXT: f32 = 12.5 / 16.;
 
 /// The two-cell icon switch a document header carries.
 ///
@@ -269,6 +280,90 @@ where
 }
 
 impl Tty7App {
+    /// A filled document's lead: the terminal it covers, by name, and a way
+    /// back that keeps the file or diff open beside it. Both surfaces use this
+    /// button so returning to the terminal never depends on which document is
+    /// in front. A docked header already has the terminal beside it.
+    pub(crate) fn render_document_terminal_button(
+        &self,
+        chrome: DocumentChrome,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if chrome != DocumentChrome::Fill {
+            return None;
+        }
+        let theme = cx.theme();
+        let name = self
+            .tabs
+            .get(self.active)
+            .map(|tab| self.tab_label(tab, self.active, Some(window), cx))
+            .unwrap_or_default();
+        let badge_bg = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.selected);
+        Some(
+            h_flex()
+                .flex_none()
+                .items_center()
+                .child(
+                    h_flex()
+                        .id("document-back-to-terminal")
+                        .when(cfg!(test), |button| {
+                            button.debug_selector(|| "document-back-to-terminal".into())
+                        })
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("{}: {name}", t(L10nKey::DocumentDock)))
+                        .occlude()
+                        .h(px(HEADER_CELL_H))
+                        .pl(px(8.))
+                        .pr(px(10.))
+                        .gap(px(7.))
+                        .items_center()
+                        .rounded(px(HEADER_CELL_RADIUS))
+                        .text_size(rems(HEADER_CELL_TEXT))
+                        .text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.sidebar_accent).text_color(theme.foreground))
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(16.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(badge_bg)
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(px(9.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(">_"),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(HEADER_CELL_MAX_W))
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .child(name),
+                        )
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new(t(L10nKey::DocumentDock))
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_document_layout(DocumentLayout::Dock, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(crate::ui::theme::hairline(window))
+                        .h(px(16.))
+                        .mx(px(6.))
+                        .bg(theme.border),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The layout the active tab's document was asked for, which is not always
     /// the one it gets — see [`Tty7App::document_dock_px`].
     ///

@@ -3405,8 +3405,7 @@ impl Tty7App {
                 }))
                 .into_any_element()
         };
-        let back =
-            (chrome == DocumentChrome::Fill).then(|| self.render_back_to_terminal(window, cx));
+        let back = self.render_document_terminal_button(chrome, window, cx);
         row.flex_none()
             // The border is spent on the box, not on the paint: this header
             // shows no rule, but its tiles sit in the band the traffic lights

@@ -686,6 +686,7 @@ impl Tty7App {
                 + (crate::ui::app::TILE_SIZE - CLOSE_TILE) / 2.))
             .gap_2()
             .items_center()
+            .children(self.render_document_terminal_button(chrome, window, cx))
             .child(
                 gpui::svg()
                     .path(subject.icon)
@@ -3056,6 +3057,68 @@ mod overlay_gpui_tests {
             // The card is what carries the rows, so open it.
             overlay.expanded.insert("a.rs".to_string(), true);
         });
+    }
+
+    /// Returning to the terminal docks the current diff instead of closing or
+    /// reloading it. The same button the editor uses must preserve a focused
+    /// file and the view mode, and change only this tab's document layout.
+    #[gpui::test]
+    fn the_filled_diffs_terminal_button_docks_without_losing_the_patch(cx: &mut TestAppContext) {
+        use crate::core::config::DocumentLayout;
+
+        let (app, mut vcx, _panes) = test_window::harness_with_tabs(cx, 2);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        // A supplied patch has no background git probe that can replace the
+        // fixture while the simulated click pumps the executor.
+        let source = DiffSource::Patch {
+            id: "terminal-return-test".into(),
+            label: None,
+        };
+        show(&app, &mut vcx, source.clone());
+        let snapshot = app.update_in(&mut vcx, |app, _, cx| {
+            app.set_document_layout(DocumentLayout::Fill, cx);
+            app.update_config(cx, |cfg| cfg.diff_view = DiffViewMode::Unified);
+            let overlay = app.tabs[app.active].diff_overlay.as_mut().unwrap();
+            overlay.focus = Some("a.rs".into());
+            let DiffLoad::Ready(snapshot) = &overlay.load else {
+                panic!("the fixture has a ready patch");
+            };
+            snapshot.clone()
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = vcx
+            .debug_bounds("document-back-to-terminal")
+            .expect("a filled diff exposes the terminal button");
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            assert_eq!(app.document_layout(cx), DocumentLayout::Dock);
+            assert_eq!(
+                app.tabs[1].document_layout, None,
+                "other tabs keep their layout"
+            );
+            assert_eq!(cx.global::<Config>().diff_view, DiffViewMode::Unified);
+            let overlay = app.tabs[app.active].diff_overlay.as_ref().unwrap();
+            assert_eq!(overlay.source, source);
+            assert_eq!(overlay.focus.as_deref(), Some("a.rs"));
+            assert_eq!(overlay.expanded.get("a.rs"), Some(&true));
+            let DiffLoad::Ready(current) = &overlay.load else {
+                panic!("docking keeps the ready patch");
+            };
+            assert!(
+                Arc::ptr_eq(current, &snapshot),
+                "docking does not reload the patch"
+            );
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds("document-back-to-terminal").is_none(),
+            "a docked diff already has the terminal beside it"
+        );
     }
 
     /// Every header branch, every row renderer, once each. A missing icon, an
