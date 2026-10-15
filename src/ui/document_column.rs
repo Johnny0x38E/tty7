@@ -17,9 +17,8 @@
 //! document falls back to it for that frame without touching what the user
 //! saved.
 
-use gpui::{AnyElement, Context, Window, div, prelude::*, px};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::{ActiveTheme as _, InteractiveElementExt as _, v_flex};
+use gpui::{AnyElement, Context, FontWeight, Window, div, prelude::*, px, rems};
+use gpui_component::{ActiveTheme as _, InteractiveElementExt as _, h_flex, v_flex};
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 
@@ -83,7 +82,295 @@ impl DocumentChrome {
     }
 }
 
+/// Document header cells share the editor file strip's dimensions, so the
+/// terminal button looks the same beside file tabs and a diff's subject.
+/// Height of a header cell — a file, the `+N` button, the terminal pill.
+pub(crate) const HEADER_CELL_H: f32 = 28.;
+/// Their corner.
+pub(crate) const HEADER_CELL_RADIUS: f32 = 7.;
+/// The widest a name may make its cell before it is elided.
+pub(crate) const HEADER_CELL_MAX_W: f32 = 168.;
+/// Header text: a half step under the body size, like the rail's rows.
+pub(crate) const HEADER_CELL_TEXT: f32 = 12.5 / 16.;
+
+/// The two-cell icon switch a document header carries.
+///
+/// One builder for the two switches the headers hold — Dock / Fill for the box a
+/// document sits in, and Split / Unified for how a diff lays out — because they
+/// stand side by side in the same row, and a cell size, track fill or raised
+/// shadow that differs between them reads as one of the two being drawn wrong.
+const SWITCH_CELL_W: f32 = 24.;
+const SWITCH_CELL_H: f32 = 22.;
+/// The window every glyph is drawn inside. 14 × 11 is the frame the Dock / Fill
+/// pair has always used, so a new glyph joins that family rather than starting a
+/// second one beside it.
+const SWITCH_FRAME_W: f32 = 14.;
+const SWITCH_FRAME_H: f32 = 11.;
+const SWITCH_EDGE: f32 = 2.;
+const SWITCH_GAP: f32 = 2.;
+const SWITCH_LEAD: f32 = 8.;
+const SWITCH_CELL_RADIUS: f32 = 5.;
+const SWITCH_TRACK_RADIUS: f32 = 7.;
+
+/// Which cell a document's layout switch raises: the box the surface is
+/// actually in, which a window too narrow to seat a column decides rather than
+/// the config does. A switch that raised what was *asked* would have the raised
+/// cell and the screen disagree, and the cell it pointed at would be the one
+/// clicking cannot reach.
+pub(crate) fn layout_switch_cell(chrome: DocumentChrome) -> DocumentLayout {
+    match chrome.is_dock() {
+        true => DocumentLayout::Dock,
+        false => DocumentLayout::Fill,
+    }
+}
+
+/// The ink a cell's glyph is drawn in: the live one in body ink, the rest one
+/// rung down, so the raised cell is the only dark mark on the track.
+pub(crate) fn switch_ink(live: bool, cx: &gpui::App) -> gpui::Hsla {
+    let theme = cx.theme();
+    match live {
+        true => theme.foreground,
+        false => theme.muted_foreground,
+    }
+}
+
+/// The frame of a switch glyph, empty.
+fn switch_frame(ink: gpui::Hsla) -> gpui::Div {
+    div()
+        .relative()
+        .w(px(SWITCH_FRAME_W))
+        .h(px(SWITCH_FRAME_H))
+        .border_1()
+        .border_color(ink)
+        .rounded(px(2.))
+}
+
+/// Dock: the window with the column the document takes beside the terminal.
+pub(crate) fn glyph_dock(ink: gpui::Hsla) -> gpui::AnyElement {
+    switch_frame(ink)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(4.))
+                .w(px(1.))
+                .bg(ink),
+        )
+        .into_any_element()
+}
+
+/// Fill: the window, filled — the document is the whole workspace.
+pub(crate) fn glyph_fill(ink: gpui::Hsla) -> gpui::AnyElement {
+    switch_frame(ink)
+        .child(
+            div()
+                .absolute()
+                .top(px(1.5))
+                .bottom(px(1.5))
+                .left(px(1.5))
+                .right(px(1.5))
+                .rounded(px(0.8))
+                .bg(ink),
+        )
+        .into_any_element()
+}
+
+/// Split / Unified: the patch's two sides as two frames, side by side or
+/// stacked.
+///
+/// Two separate frames rather than one frame with a stroke through it: Dock is
+/// already a frame with a vertical stroke, and the two switches stand next to
+/// each other in the diff header, so a divided frame read as Dock drawn twice.
+fn glyph_two_panes(ink: gpui::Hsla, side_by_side: bool) -> gpui::AnyElement {
+    const GAP: f32 = 2.;
+    let (w, h) = match side_by_side {
+        true => ((SWITCH_FRAME_W - GAP) / 2., SWITCH_FRAME_H),
+        false => (SWITCH_FRAME_W, (SWITCH_FRAME_H - GAP) / 2.),
+    };
+    let pane = || {
+        div()
+            .w(px(w))
+            .h(px(h))
+            .border_1()
+            .border_color(ink)
+            .rounded(px(1.5))
+    };
+    div()
+        .flex()
+        .when(!side_by_side, |d| d.flex_col())
+        .w(px(SWITCH_FRAME_W))
+        .h(px(SWITCH_FRAME_H))
+        .gap(px(GAP))
+        .child(pane())
+        .child(pane())
+        .into_any_element()
+}
+
+/// Split: the two sides next to each other.
+pub(crate) fn glyph_split(ink: gpui::Hsla) -> gpui::AnyElement {
+    glyph_two_panes(ink, true)
+}
+
+/// Unified: the two sides stacked, one above the other.
+pub(crate) fn glyph_unified(ink: gpui::Hsla) -> gpui::AnyElement {
+    glyph_two_panes(ink, false)
+}
+
+/// The sunken track the two cells sit on.
+pub(crate) fn switch_track(
+    id: &'static str,
+    cells: Vec<gpui::AnyElement>,
+    cx: &gpui::App,
+) -> gpui::AnyElement {
+    let sf = cx.global::<crate::ui::presets::Surfaces>().window;
+    h_flex()
+        .id(id)
+        .occlude()
+        .flex_none()
+        .ml(px(SWITCH_LEAD))
+        .p(px(SWITCH_EDGE))
+        .gap(px(SWITCH_GAP))
+        .rounded(px(SWITCH_TRACK_RADIUS))
+        .bg(gpui::rgb(sf.hover))
+        .children(cells)
+        .into_any_element()
+}
+
+/// One cell of a [`switch_track`]: its glyph, raised when it is what is on
+/// screen, and the tooltip and a11y label that name it — a divider down a frame
+/// cannot say "side by side" on its own.
+pub(crate) fn switch_cell<H>(
+    id: impl Into<gpui::ElementId>,
+    glyph: gpui::AnyElement,
+    live: bool,
+    tip: L10nKey,
+    on_pick: H,
+    cx: &gpui::App,
+) -> gpui::AnyElement
+where
+    H: Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+{
+    let theme = cx.theme();
+    let sf = cx.global::<crate::ui::presets::Surfaces>().window;
+    let dark = theme.mode.is_dark();
+    div()
+        .id(id)
+        // The glyph has no text for assistive technology to read. Use the
+        // tooltip's localized name and expose the raised cell as a pressed
+        // button; GPUI also routes accessible clicks to the on_click handler.
+        .role(gpui::Role::Button)
+        .aria_label(t(tip))
+        .aria_toggled(if live {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .w(px(SWITCH_CELL_W))
+        .h(px(SWITCH_CELL_H))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(SWITCH_CELL_RADIUS))
+        .cursor_pointer()
+        .when(live, |cell| {
+            cell.bg(match dark {
+                true => gpui::rgb(sf.selected).into(),
+                false => theme.background,
+            })
+            .shadow_xs()
+        })
+        .child(glyph)
+        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx))
+        .on_click(on_pick)
+        .into_any_element()
+}
+
 impl Tty7App {
+    /// A filled document's lead: the terminal it covers, by name, and a way
+    /// back that keeps the file or diff open beside it. Both surfaces use this
+    /// button so returning to the terminal never depends on which document is
+    /// in front. A docked header already has the terminal beside it.
+    pub(crate) fn render_document_terminal_button(
+        &self,
+        chrome: DocumentChrome,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if chrome != DocumentChrome::Fill {
+            return None;
+        }
+        let theme = cx.theme();
+        let name = self
+            .tabs
+            .get(self.active)
+            .map(|tab| self.tab_label(tab, self.active, Some(window), cx))
+            .unwrap_or_default();
+        let badge_bg = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.selected);
+        Some(
+            h_flex()
+                .flex_none()
+                .items_center()
+                .child(
+                    h_flex()
+                        .id("document-back-to-terminal")
+                        .when(cfg!(test), |button| {
+                            button.debug_selector(|| "document-back-to-terminal".into())
+                        })
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("{}: {name}", t(L10nKey::DocumentDock)))
+                        .occlude()
+                        .h(px(HEADER_CELL_H))
+                        .pl(px(8.))
+                        .pr(px(10.))
+                        .gap(px(7.))
+                        .items_center()
+                        .rounded(px(HEADER_CELL_RADIUS))
+                        .text_size(rems(HEADER_CELL_TEXT))
+                        .text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.sidebar_accent).text_color(theme.foreground))
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(16.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(badge_bg)
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(px(9.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(">_"),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(HEADER_CELL_MAX_W))
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .child(name),
+                        )
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new(t(L10nKey::DocumentDock))
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_document_layout(DocumentLayout::Dock, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(crate::ui::theme::hairline(window))
+                        .h(px(16.))
+                        .mx(px(6.))
+                        .bg(theme.border),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The layout the active tab's document was asked for, which is not always
     /// the one it gets — see [`Tty7App::document_dock_px`].
     ///
@@ -203,42 +490,46 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// What right-clicking a document's header offers: where it sits.
+    /// Dock / Fill, as a two-cell icon switch: a raised cell on a sunken track.
     ///
     /// On the header rather than in Settings because this is where the question
-    /// comes up — the moment a file covers the terminal is the moment you want
-    /// it not to, and a preference three pages into a settings panel is not an
-    /// answer to that. On the header rather than on a tile beside the close
-    /// button because the row already carries a file name, a dirty dot and, for
-    /// a diff, a view toggle; a fifth control in a column's width is one too
-    /// many for something you set once.
+    /// comes up — the moment a file covers the terminal is the moment you want it
+    /// not to, and a preference three pages into a settings panel is not an answer
+    /// to that.
     ///
-    pub(crate) fn document_header_menu(
-        menu: PopupMenu,
-        app: &gpui::WeakEntity<Self>,
-        cx: &gpui::App,
-    ) -> PopupMenu {
-        let docked = app
-            .upgrade()
-            .is_none_or(|this| this.read(cx).document_layout(cx) == DocumentLayout::Dock);
-        let mut menu = menu.min_w(px(220.));
-
-        for (label, layout) in [
-            (L10nKey::DocumentDock, DocumentLayout::Dock),
-            (L10nKey::DocumentFill, DocumentLayout::Fill),
-        ] {
-            menu = menu.item(
-                PopupMenuItem::new(t(label))
-                    .checked(docked == (layout == DocumentLayout::Dock))
-                    .on_click({
-                        let app = app.clone();
-                        move |_, _window, cx| {
-                            let _ = app.update(cx, |this, cx| this.set_document_layout(layout, cx));
-                        }
-                    }),
-            );
-        }
-        menu
+    /// It used to be a right-click menu, which only answered for someone who
+    /// already knew the menu was there: the code panel's switch was the one anyone
+    /// found, so the diff panel — which had the menu and nothing else — looked to
+    /// have no say in the matter at all. Both headers now carry this one.
+    pub(crate) fn document_layout_switch(
+        &self,
+        chrome: DocumentChrome,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let current = layout_switch_cell(chrome);
+        let cell = |i: usize,
+                    layout: DocumentLayout,
+                    glyph: fn(gpui::Hsla) -> AnyElement,
+                    tip: L10nKey| {
+            let live = layout == current;
+            let ink = switch_ink(live, cx);
+            switch_cell(
+                ("document-layout", i),
+                glyph(ink),
+                live,
+                tip,
+                cx.listener(move |this, _, _, cx| this.set_document_layout(layout, cx)),
+                cx,
+            )
+        };
+        switch_track(
+            "document-layout-switch",
+            vec![
+                cell(0, DocumentLayout::Dock, glyph_dock, L10nKey::DocumentDock),
+                cell(1, DocumentLayout::Fill, glyph_fill, L10nKey::DocumentFill),
+            ],
+            cx,
+        )
     }
 
     /// The column itself: the surface `overlay_top` selects, sized, bordered,
@@ -433,12 +724,31 @@ pub(crate) fn next_ratio_stop(current: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{dragged_ratio, next_ratio_stop};
+    use super::{DocumentChrome, dragged_ratio, layout_switch_cell, next_ratio_stop};
     use crate::core::config::{
         DOCUMENT_RATIO_HALF, DOCUMENT_RATIO_MAX, DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_THIRD,
-        DOCUMENT_RATIO_TWO_THIRDS,
+        DOCUMENT_RATIO_TWO_THIRDS, DocumentLayout,
     };
     use crate::ui::app::{DOCUMENT_MIN_W, TERMINAL_MIN_W, document_column_px};
+
+    /// Both document headers raise the cell that matches what is on screen, so
+    /// the narrow-window fallback — where a tab asked to dock is drawn filled —
+    /// cannot leave the switch pointing at a box the surface is not in.
+    #[test]
+    fn the_layout_switch_raises_the_box_the_document_is_actually_in() {
+        assert_eq!(
+            layout_switch_cell(DocumentChrome::Fill),
+            DocumentLayout::Fill,
+            "the overlay is the whole workspace"
+        );
+        for column in [DocumentChrome::Dock, DocumentChrome::DockHoisted] {
+            assert_eq!(
+                layout_switch_cell(column),
+                DocumentLayout::Dock,
+                "a column is a column, hoisted header or not"
+            );
+        }
+    }
 
     /// Nothing the divider can write is something the next launch moves.
     /// `Config::sanitize` clamps `document_ratio` into a band, so a drag that

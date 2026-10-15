@@ -22,14 +22,14 @@ use crate::terminal::git_diff::{
 /// says the read failed rather than showing a silently cut-off file — and the
 /// line budget below cuts rendering long before this does anyway.
 const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
-use crate::ui::app::Tty7App;
+use crate::ui::app::{TitleStripRow as _, Tty7App};
 use crate::ui::diff_list::{DiffRow, FileHead, RowAt};
 use crate::ui::diff_rows::{DiffSelection, Side, SplitCell, SplitRow, UnifiedRow};
-use crate::ui::document_column::DocumentChrome;
-use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
-use crate::ui::right_panel::{
-    HEADING, META, META_MONO, TAB_TEXT, TEXT, TEXT_MONO, git_badge, info_chip,
+use crate::ui::document_column::{
+    DocumentChrome, glyph_split, glyph_unified, switch_cell, switch_ink, switch_track,
 };
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
+use crate::ui::right_panel::{HEADING, META, META_MONO, TEXT, TEXT_MONO, git_badge, info_chip};
 use crate::ui::rounding;
 use crate::ui::scm::path::relative_time;
 use crate::ui::scm::status::{status_color, status_glyph};
@@ -666,7 +666,6 @@ impl Tty7App {
         let subject = source_subject(&overlay.source, branch);
         let subject_takes_the_slack =
             chrome.is_dock() && !subject.is_rev && subject.label.is_none();
-        let menu_app = cx.entity().downgrade();
         let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
         let row = h_flex().id("diff-overlay-header");
         let row = if chrome.header_is_title_strip() {
@@ -675,7 +674,10 @@ impl Tty7App {
             row
         };
         row.flex_shrink_0()
-            .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
+            // The row's own hairline stays exactly as thin as it is drawn; it
+            // only gives back the half point the title bar spends, so this
+            // header's tiles land on the traffic lights' line rather than below.
+            .title_strip_row(HAIRLINE_W, hairline(cx))
             .pl(px(lead))
             // The close tile is a notch smaller than the title bar's own, and
             // is pulled in by half the difference so its glyph stays on the
@@ -684,8 +686,7 @@ impl Tty7App {
                 + (crate::ui::app::TILE_SIZE - CLOSE_TILE) / 2.))
             .gap_2()
             .items_center()
-            .border_b(HAIRLINE_W)
-            .border_color(hairline(cx))
+            .children(self.render_document_terminal_button(chrome, window, cx))
             .child(
                 gpui::svg()
                     .path(subject.icon)
@@ -877,6 +878,11 @@ impl Tty7App {
                     .flex_shrink_0()
                     .child(self.diff_view_switch(cx)),
             )
+            // Where the panel sits, answered by the same two cells the code panel
+            // offers. This used to be a right-click menu only, so the one surface
+            // whose whole point is showing half a screen of context had no way to
+            // ask for the screen.
+            .child(self.document_layout_switch(chrome, cx))
             .child(
                 div().occlude().flex_shrink_0().child(
                     crate::ui::tab_strip::chrome_tile_sized(
@@ -893,61 +899,49 @@ impl Tty7App {
                     })),
                 ),
             )
-            .context_menu(move |menu, _window, cx| {
-                Tty7App::document_header_menu(menu, &menu_app, cx)
-            })
     }
 
-    /// The two views, as a switch rather than a control.
+    /// The two views, as a drawn switch on the track the layout switch sits on.
     ///
-    /// Not [`Tty7App::segmented_on`]: that one is a filled track, which is
-    /// right in a settings row, where it ends a line of prose and has to
-    /// announce itself as something you operate. On a title bar it was the
-    /// only bordered thing on the strip — the close tile beside it is a bare
-    /// glyph, and so is every tile at the other end of the window — so it read
-    /// as pasted on. Same two choices, no frame: the live one carries a soft
-    /// fill, the other is quiet text that lights up under the pointer.
+    /// Text labels said "Split" and "Unified" in whatever language the interface
+    /// is set to, in a row that carries no other words of its own, and the choice
+    /// is a picture of the layout rather than a name for it. Same two answers, now
+    /// the same two cells as Dock / Fill beside them — which has always been drawn
+    /// rather than written, so the pair would have looked like two unrelated
+    /// widgets sharing one strip.
     ///
-    /// The cells are the list's own row pills — row height, row radius — set
-    /// in the right panel's tab type, so the switch reads as two more rows of
-    /// the same app rather than as a widget.
+    /// The tooltip still carries the words: a divider down a frame is not
+    /// self-explanatory, and neither is a set of rules across one.
     fn diff_view_switch(&self, cx: &mut Context<Self>) -> AnyElement {
-        let sf = cx.global::<crate::ui::presets::Surfaces>().window;
         let current = view_mode(cx);
-        let cells = [
-            (DiffViewMode::Split, t(L10nKey::DiffViewSplit)),
-            (DiffViewMode::Unified, t(L10nKey::DiffViewUnified)),
-        ];
-        h_flex()
-            .id("diff-overlay-view")
-            .flex_shrink_0()
-            .gap(px(2.))
-            .children(cells.into_iter().enumerate().map(|(i, (mode, label))| {
+        let cell =
+            |i: usize, mode: DiffViewMode, glyph: fn(gpui::Hsla) -> AnyElement, tip: L10nKey| {
                 let live = mode == current;
-                h_flex()
-                    .id(("diff-overlay-view-cell", i))
-                    .items_center()
-                    .h(CONTROL_H)
-                    .px(px(10.))
-                    .rounded(ROW_RADIUS)
-                    .text_size(rems(TAB_TEXT))
-                    .cursor_pointer()
-                    .when(live, |cell| {
-                        cell.bg(gpui::rgb(sf.selected))
-                            .text_color(gpui::rgb(sf.text_selected))
-                            .font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!live, |cell| {
-                        cell.text_color(cx.theme().muted_foreground)
-                            .hover(|h| h.bg(gpui::rgb(sf.hover)))
-                    })
-                    .active(|cell| cell.bg(gpui::rgb(sf.pressed)))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
+                let ink = switch_ink(live, cx);
+                switch_cell(
+                    ("diff-overlay-view-cell", i),
+                    glyph(ink),
+                    live,
+                    tip,
+                    cx.listener(move |this, _, _window, cx| {
                         this.update_config(cx, |cfg| cfg.diff_view = mode);
-                    }))
-                    .child(label)
-            }))
-            .into_any_element()
+                    }),
+                    cx,
+                )
+            };
+        switch_track(
+            "diff-overlay-view",
+            vec![
+                cell(0, DiffViewMode::Split, glyph_split, L10nKey::DiffViewSplit),
+                cell(
+                    1,
+                    DiffViewMode::Unified,
+                    glyph_unified,
+                    L10nKey::DiffViewUnified,
+                ),
+            ],
+            cx,
+        )
     }
 
     /// Dispatch the byte read behind an untracked file's preview, at most
@@ -3063,6 +3057,68 @@ mod overlay_gpui_tests {
             // The card is what carries the rows, so open it.
             overlay.expanded.insert("a.rs".to_string(), true);
         });
+    }
+
+    /// Returning to the terminal docks the current diff instead of closing or
+    /// reloading it. The same button the editor uses must preserve a focused
+    /// file and the view mode, and change only this tab's document layout.
+    #[gpui::test]
+    fn the_filled_diffs_terminal_button_docks_without_losing_the_patch(cx: &mut TestAppContext) {
+        use crate::core::config::DocumentLayout;
+
+        let (app, mut vcx, _panes) = test_window::harness_with_tabs(cx, 2);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        // A supplied patch has no background git probe that can replace the
+        // fixture while the simulated click pumps the executor.
+        let source = DiffSource::Patch {
+            id: "terminal-return-test".into(),
+            label: None,
+        };
+        show(&app, &mut vcx, source.clone());
+        let snapshot = app.update_in(&mut vcx, |app, _, cx| {
+            app.set_document_layout(DocumentLayout::Fill, cx);
+            app.update_config(cx, |cfg| cfg.diff_view = DiffViewMode::Unified);
+            let overlay = app.tabs[app.active].diff_overlay.as_mut().unwrap();
+            overlay.focus = Some("a.rs".into());
+            let DiffLoad::Ready(snapshot) = &overlay.load else {
+                panic!("the fixture has a ready patch");
+            };
+            snapshot.clone()
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = vcx
+            .debug_bounds("document-back-to-terminal")
+            .expect("a filled diff exposes the terminal button");
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            assert_eq!(app.document_layout(cx), DocumentLayout::Dock);
+            assert_eq!(
+                app.tabs[1].document_layout, None,
+                "other tabs keep their layout"
+            );
+            assert_eq!(cx.global::<Config>().diff_view, DiffViewMode::Unified);
+            let overlay = app.tabs[app.active].diff_overlay.as_ref().unwrap();
+            assert_eq!(overlay.source, source);
+            assert_eq!(overlay.focus.as_deref(), Some("a.rs"));
+            assert_eq!(overlay.expanded.get("a.rs"), Some(&true));
+            let DiffLoad::Ready(current) = &overlay.load else {
+                panic!("docking keeps the ready patch");
+            };
+            assert!(
+                Arc::ptr_eq(current, &snapshot),
+                "docking does not reload the patch"
+            );
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds("document-back-to-terminal").is_none(),
+            "a docked diff already has the terminal beside it"
+        );
     }
 
     /// Every header branch, every row renderer, once each. A missing icon, an

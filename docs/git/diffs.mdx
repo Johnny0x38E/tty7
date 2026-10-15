@@ -12,8 +12,9 @@ description: "The diff overlay: side-by-side or unified, from the sidebar or the
 | History | Click a file inside a commit's detail view |
 
 A diff docks beside the terminal, in the same column an open file uses, so the
-pane you were reading stays on screen. <kbd>Esc</kbd> closes it, and its header
-right-clicks to a menu that fills the window with it if you prefer that —
+pane you were reading stays on screen. <kbd>Esc</kbd> closes it, and the two
+cells at the end of its header — the same Dock / Fill switch an open file
+carries — send it across the whole window instead
 [more about the column →](/window/side-panel#where-it-opens)
 
 <Frame caption="The diff, side by side, across every changed file">
@@ -22,10 +23,12 @@ right-clicks to a menu that fills the window with it if you prefer that —
 
 ## Side-by-side or unified
 
-**Toggle Unified / Side-by-Side Diff** in Search Everywhere switches between
-the two. The choice is global — one setting for every diff, the same call VS
-Code's `diffEditor.renderSideBySide` makes — and persists as `diff_view` in
-`config.json`.
+The two cells beside the Dock / Fill switch draw it: two panes next to each
+other is side by side, two panes stacked is unified. Hovering one
+names it, and **Toggle Unified / Side-by-Side Diff** in Search Everywhere does
+the same thing from the keyboard. The choice is global — one setting for every
+diff, the same call VS Code's `diffEditor.renderSideBySide` makes — and persists
+as `diff_view` in `config.json`.
 
 ## What it shows
 

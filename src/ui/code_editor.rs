@@ -15,7 +15,7 @@ use gpui_component::{
 };
 use tty7_core::core::machine::TabId;
 
-use crate::ui::app::Tty7App;
+use crate::ui::app::{TITLE_BAR_BORDER, TitleStripRow as _, Tty7App};
 use crate::ui::document_column::DocumentChrome;
 use crate::ui::editor_session::{self, TabEditor};
 use crate::ui::editor_text::{self, EditorConfig, Indent, LineEnding, TextFormat};
@@ -3405,13 +3405,22 @@ impl Tty7App {
                 }))
                 .into_any_element()
         };
-        let back =
-            (chrome == DocumentChrome::Fill).then(|| self.render_back_to_terminal(window, cx));
+        let back = self.render_document_terminal_button(chrome, window, cx);
         row.flex_none()
-            .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
-            .items_center()
+            // The border is spent on the box, not on the paint: this header
+            // shows no rule, but its tiles sit in the band the traffic lights
+            // hang over and have to keep the title bar's line.
+            .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
             .gap(px(2.))
-            .pl(px(lead - 8.).max(px(0.)))
+            // The whole reserve, not the reserve less the first control's own
+            // inset. The filled editor leads with the back pill, whose 8pt of
+            // inner padding is *inside* its hover box — carving it out of here
+            // starts that box 8pt early and consumes part of the gap reserved
+            // after the traffic lights, even when the lead follows their inset.
+            // Docked, the row leads with the file tabs instead, and the same
+            // subtraction put their first
+            // glyph at 4pt rather than the `CONTENT_INSET` this bar is built on.
+            .pl(px(lead))
             // The glyph, not the tile, lands on `CONTENT_INSET`, the column
             // the file name starts on at the other end of the bar.
             .pr(px(crate::ui::app::CONTENT_INSET - (tile - glyph) / 2.))
@@ -3436,7 +3445,7 @@ impl Tty7App {
             )
             // Whatever is left of the bar stays a place to drag the window by.
             .child(div().flex_1().h_full())
-            .child(self.render_layout_switch(chrome, cx))
+            .child(self.document_layout_switch(chrome, cx))
             .child(
                 div().occlude().flex_none().ml(px(4.)).child(
                     crate::ui::tab_strip::chrome_tile_sized(
