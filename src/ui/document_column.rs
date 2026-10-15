@@ -176,38 +176,45 @@ pub(crate) fn glyph_fill(ink: gpui::Hsla) -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// Split: the window divided down the middle — the two sides, each its own
-/// column of the patch.
-pub(crate) fn glyph_split(ink: gpui::Hsla) -> gpui::AnyElement {
-    switch_frame(ink)
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(px(5.5))
-                .w(px(1.))
-                .bg(ink),
-        )
+/// Split / Unified: the patch's two sides as two frames, side by side or
+/// stacked.
+///
+/// Two separate frames rather than one frame with a stroke through it: Dock is
+/// already a frame with a vertical stroke, and the two switches stand next to
+/// each other in the diff header, so a divided frame read as Dock drawn twice.
+fn glyph_two_panes(ink: gpui::Hsla, side_by_side: bool) -> gpui::AnyElement {
+    const GAP: f32 = 2.;
+    let (w, h) = match side_by_side {
+        true => ((SWITCH_FRAME_W - GAP) / 2., SWITCH_FRAME_H),
+        false => (SWITCH_FRAME_W, (SWITCH_FRAME_H - GAP) / 2.),
+    };
+    let pane = || {
+        div()
+            .w(px(w))
+            .h(px(h))
+            .border_1()
+            .border_color(ink)
+            .rounded(px(1.5))
+    };
+    div()
+        .flex()
+        .when(!side_by_side, |d| d.flex_col())
+        .w(px(SWITCH_FRAME_W))
+        .h(px(SWITCH_FRAME_H))
+        .gap(px(GAP))
+        .child(pane())
+        .child(pane())
         .into_any_element()
 }
 
-/// Unified: the window with one line across it — the two sides stacked, which is
-/// what the other view is not. The same one-stroke construction as Dock, turned
-/// a quarter turn, so the pair reads as a question about direction rather than
-/// as two different pictures.
+/// Split: the two sides next to each other.
+pub(crate) fn glyph_split(ink: gpui::Hsla) -> gpui::AnyElement {
+    glyph_two_panes(ink, true)
+}
+
+/// Unified: the two sides stacked, one above the other.
 pub(crate) fn glyph_unified(ink: gpui::Hsla) -> gpui::AnyElement {
-    switch_frame(ink)
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(4.))
-                .h(px(1.))
-                .bg(ink),
-        )
-        .into_any_element()
+    glyph_two_panes(ink, false)
 }
 
 /// The sunken track the two cells sit on.

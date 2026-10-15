@@ -3411,7 +3411,6 @@ impl Tty7App {
             // shows no rule, but its tiles sit in the band the traffic lights
             // hang over and have to keep the title bar's line.
             .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
-            .items_center()
             .gap(px(2.))
             // The whole reserve, not the reserve less the first control's own
             // inset. The filled editor leads with the back pill, whose 8pt of
