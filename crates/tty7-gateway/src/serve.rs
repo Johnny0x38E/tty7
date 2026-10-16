@@ -93,6 +93,13 @@ pub trait PaneFeed: Send {
     /// The next message, or `Ok(None)` if none arrived within `wait`.
     fn recv(&mut self, wait: Duration) -> io::Result<Option<DaemonMsg>>;
 
+    /// How much of the next message has come in so far, without the rest of
+    /// it: a long one on a slow link is still arriving while `recv` comes
+    /// back empty.
+    fn partial(&self) -> usize {
+        0
+    }
+
     /// The way back to the daemon on the same connection, for a take-over.
     /// Taken once, before the feed goes to its reader thread.
     fn leases(&mut self) -> Option<Box<dyn PaneLeases>> {
@@ -718,6 +725,11 @@ async fn pane_stream(
 /// stale to stop, and the longest it waits while output keeps coming.
 const DRAW_SETTLE: Duration = Duration::from_millis(30);
 const DRAW_LIMIT: Duration = Duration::from_millis(200);
+/// How long the replay that opens a pane's feed may go quiet before it is
+/// taken to be over. The daemon marks no end to it: usually the pane's status
+/// follows and says so, but a pane with none to report ends on its last
+/// segment, and only this tells it from one held up on a slow link.
+const REPLAY_SETTLE: Duration = Duration::from_millis(500);
 
 fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
     // The daemon reports the agent and its status in separate messages; the
@@ -731,6 +743,17 @@ fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
     let mut mirror: Option<Mirror> = None;
     let mut size = (80, 24);
     let mut stale: Option<Instant> = Some(Instant::now());
+    // Whether the feed is still in the replay it opens with (sizes and
+    // segments of the ring, `ReplayRing::replay`), and when it last said
+    // anything. The ring runs oldest first, so a drawing made before its end
+    // shows the phone what the pane had on it long ago — a restored session's
+    // old screen, say — however long the replay takes over a slow link. The
+    // quiet only counts once the feed has said something: a link slow to
+    // deliver the first frame is not a replay that has ended. Nor is one
+    // still delivering a segment: part of a message is something said.
+    let mut replaying = true;
+    let mut heard: Option<Instant> = None;
+    let mut partial = 0;
     loop {
         if down.is_closed() {
             return;
@@ -749,13 +772,28 @@ fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
                 return;
             }
         };
+        // The replay is over at the first thing it does not consist of, or
+        // once it has been quiet for long enough.
+        if replaying {
+            let said = msg.is_some() || feed.partial() != partial;
+            partial = feed.partial();
+            replaying = match &msg {
+                Some(DaemonMsg::Size(_) | DaemonMsg::Snapshot(_)) => true,
+                Some(_) => false,
+                None => said || heard.is_none_or(|at| at.elapsed() < REPLAY_SETTLE),
+            };
+            if said {
+                heard = Some(Instant::now());
+            }
+        }
         // Drawn once the burst is over, or anything other than output is
-        // about to be said, or it has waited long enough.
+        // about to be said, or it has waited long enough — but never before
+        // the replay is all in.
         let burst = matches!(
             msg,
             Some(DaemonMsg::Size(_) | DaemonMsg::Snapshot(_) | DaemonMsg::Output(_))
         );
-        if stale.is_some_and(|since| !burst || since.elapsed() >= DRAW_LIMIT) {
+        if !replaying && stale.is_some_and(|since| !burst || since.elapsed() >= DRAW_LIMIT) {
             stale = None;
             if let Some(mirror) = &mirror {
                 let (cols, rows) = size;
@@ -781,7 +819,17 @@ fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
                 stale.get_or_insert_with(Instant::now);
                 continue;
             }
-            DaemonMsg::Snapshot(bytes) | DaemonMsg::Output(bytes) => {
+            // A segment of the replay reaches the phone only in a drawing: it
+            // is a picture to rebuild the screen from, which the phone could
+            // not tell from what the pane says next.
+            DaemonMsg::Snapshot(bytes) => {
+                mirror
+                    .get_or_insert_with(|| Mirror::new(size.0, size.1))
+                    .feed(&bytes);
+                stale.get_or_insert_with(Instant::now);
+                continue;
+            }
+            DaemonMsg::Output(bytes) => {
                 let mirror = mirror.get_or_insert_with(|| Mirror::new(size.0, size.1));
                 if mirror.feed(&bytes) {
                     stale.get_or_insert_with(Instant::now);

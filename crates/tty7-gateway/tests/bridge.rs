@@ -5,7 +5,7 @@
 use std::io;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iroh::Endpoint;
 use iroh::endpoint::presets;
@@ -30,6 +30,10 @@ struct FakeMachine {
     leased: Arc<Mutex<Vec<LeaseRequest>>>,
     /// Every pane closed, with the machine it was closed on.
     closed: Mutex<Vec<(Option<String>, u64)>>,
+    /// A replay to give the next pane opened instead of the usual one, and
+    /// the messages it goes quiet before, for how long, and whether the
+    /// message is on its way meanwhile.
+    replay: Mutex<Option<(Vec<DaemonMsg>, Vec<Stall>)>>,
 }
 
 impl FakeMachine {
@@ -51,6 +55,7 @@ impl FakeMachine {
             typed: Mutex::new(None),
             leased: Arc::default(),
             closed: Mutex::default(),
+            replay: Mutex::default(),
         }
     }
 }
@@ -110,18 +115,20 @@ impl Backend for FakeMachine {
             answer,
             seen: self.leased.clone(),
         });
+        let (replay, stall) = self.replay.lock().unwrap().take().unwrap_or_else(|| {
+            (
+                vec![DaemonMsg::Size(size(100, 30)), DaemonMsg::Snapshot(prompt)],
+                Vec::new(),
+            )
+        });
         Ok(Box::new(FakeFeed {
             leases,
             answers,
-            replay: vec![
-                DaemonMsg::Size(WinSize {
-                    cols: 100,
-                    rows: 30,
-                    cell_w: 8,
-                    cell_h: 16,
-                }),
-                DaemonMsg::Snapshot(prompt),
-            ],
+            replay: replay.into(),
+            stalls: stall,
+            sent: 0,
+            stalled: None,
+            partial: 0,
             typed: rx,
         }))
     }
@@ -184,8 +191,29 @@ impl Backend for FakeMachine {
     }
 }
 
+fn size(cols: u16, rows: u16) -> WinSize {
+    WinSize {
+        cols,
+        rows,
+        cell_w: 8,
+        cell_h: 16,
+    }
+}
+
+/// Before which message of a replay it is held up, for how long, and whether
+/// that message trickles in meanwhile rather than nothing arriving at all.
+type Stall = (usize, Duration, bool);
+
 struct FakeFeed {
-    replay: Vec<DaemonMsg>,
+    replay: std::collections::VecDeque<DaemonMsg>,
+    /// The replay goes quiet before its messages at these indexes, the way
+    /// one held up on a slow link does; and how many it has given so far.
+    stalls: Vec<Stall>,
+    sent: usize,
+    /// Until when it is quiet, once it has gone so, and whether the next
+    /// message is coming in meanwhile; how much of it has.
+    stalled: Option<(Instant, bool)>,
+    partial: usize,
     typed: std_mpsc::Receiver<Vec<u8>>,
     leases: Option<FakeLeases>,
     answers: std_mpsc::Receiver<DaemonMsg>,
@@ -220,9 +248,32 @@ impl PaneFeed for FakeFeed {
             .map(|l| Box::new(l) as Box<dyn PaneLeases>)
     }
 
+    fn partial(&self) -> usize {
+        self.partial
+    }
+
     fn recv(&mut self, wait: Duration) -> io::Result<Option<DaemonMsg>> {
-        if !self.replay.is_empty() {
-            return Ok(Some(self.replay.remove(0)));
+        if let Some(at) = self.stalls.iter().position(|(at, ..)| *at == self.sent) {
+            let (_, quiet, trickle) = self.stalls.remove(at);
+            self.stalled = Some((Instant::now() + quiet, trickle));
+        }
+        // Quiet the way a socket is: each wait runs out with nothing read,
+        // or with some of a message read but not all of it.
+        if let Some((until, trickle)) = self.stalled {
+            let left = until.saturating_duration_since(Instant::now());
+            if !left.is_zero() {
+                std::thread::sleep(left.min(wait));
+                if trickle {
+                    self.partial += 1;
+                }
+                return Ok(None);
+            }
+            self.stalled = None;
+        }
+        if let Some(msg) = self.replay.pop_front() {
+            self.sent += 1;
+            self.partial = 0;
+            return Ok(Some(msg));
         }
         if let Ok(answer) = self.answers.try_recv() {
             return Ok(Some(answer));
@@ -387,6 +438,155 @@ async fn a_paired_phone_reads_the_tree_and_drives_a_pane() {
         .err()
         .expect("no such pane");
     assert!(err.to_string().contains("no such pane 99"), "{err}");
+}
+
+/// What the daemon replays of a pane whose ring holds an old session ahead of
+/// the current one, the way a pane restored from scrollback does: each
+/// segment at its own size, the later one starting from a reset.
+fn two_sessions() -> Vec<DaemonMsg> {
+    vec![
+        DaemonMsg::Size(size(100, 30)),
+        DaemonMsg::Snapshot(b"OLD SESSION\r\n".to_vec()),
+        DaemonMsg::Size(size(100, 30)),
+        DaemonMsg::Snapshot(b"\x1bc NEW SESSION $ ".to_vec()),
+    ]
+}
+
+/// Everything the phone is sent for a pane until `until` says to stop.
+async fn screen_until(
+    screen: &mut tty7_mobile_client::PaneReader,
+    until: impl Fn(&PaneItem) -> bool,
+) -> Vec<PaneItem> {
+    let mut seen = Vec::new();
+    loop {
+        let item = within(screen.next())
+            .await
+            .unwrap()
+            .expect("stream ends early");
+        let done = until(&item);
+        seen.push(item);
+        if done {
+            return seen;
+        }
+    }
+}
+
+/// The first drawing among what the phone was sent, and that nothing else it
+/// was sent carries the replay past the drawing.
+fn first_drawing(seen: &[PaneItem]) -> String {
+    let mut outputs = seen.iter().filter_map(|item| match item {
+        PaneItem::Output(bytes) => Some(bytes),
+        _ => None,
+    });
+    let first = drawing(outputs.next().cloned().map(PaneItem::Output));
+    for bytes in outputs {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(
+            !text.contains("SESSION"),
+            "the replay reached the phone raw, past its drawing: {text:?} (all: {seen:?})"
+        );
+    }
+    first
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_held_up_mid_ring_is_drawn_whole() {
+    let rig = Rig::new().await;
+    // The link goes quiet between the two segments for far longer than a
+    // drawing waits for live output to settle, but well short of what a
+    // replay is given (`REPLAY_SETTLE`).
+    let mut replay = two_sessions();
+    replay.push(DaemonMsg::Cwd("/src/demo".into()));
+    *rig.machine.replay.lock().unwrap() =
+        Some((replay, vec![(3, Duration::from_millis(150), false)]));
+    let session = within(rig.paired()).await;
+    let (_keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
+    let seen = screen_until(&mut screen, |item| {
+        matches!(item, PaneItem::Event(PaneEvent::Cwd { .. }))
+    })
+    .await;
+    let first = first_drawing(&seen);
+    assert!(
+        first.contains("NEW SESSION") && !first.contains("OLD SESSION"),
+        "the phone's first picture of the pane has to be its current screen, \
+         not the front of the ring: {first:?} (all: {seen:?})"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_segment_replay_held_up_is_drawn_not_streamed() {
+    let rig = Rig::new().await;
+    // Held up after the size, before the only segment; and nothing follows
+    // it, so the replay's end is only told by the quiet after it.
+    let replay = vec![
+        DaemonMsg::Size(size(100, 30)),
+        DaemonMsg::Snapshot(b"\x1bc NEW SESSION $ ".to_vec()),
+    ];
+    *rig.machine.replay.lock().unwrap() =
+        Some((replay, vec![(1, Duration::from_millis(150), false)]));
+    let session = within(rig.paired()).await;
+    let (_keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
+    let seen = screen_until(&mut screen, |item| {
+        matches!(item, PaneItem::Output(bytes) if String::from_utf8_lossy(bytes).contains("SESSION"))
+    })
+    .await;
+    let first = first_drawing(&seen);
+    assert!(
+        first.contains("NEW SESSION"),
+        "drawn before the replay was in, then the rest streamed raw past the \
+         drawing: {first:?} (all: {seen:?})"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_slow_to_start_is_still_drawn_whole() {
+    let rig = Rig::new().await;
+    // Nothing at all for longer than a replay is given to go quiet, then a
+    // pause mid-ring: the wait for the first frame is not a replay that ended.
+    let mut replay = two_sessions();
+    replay.push(DaemonMsg::Cwd("/src/demo".into()));
+    *rig.machine.replay.lock().unwrap() = Some((
+        replay,
+        vec![
+            (0, Duration::from_millis(700), false),
+            (3, Duration::from_millis(150), false),
+        ],
+    ));
+    let session = within(rig.paired()).await;
+    let (_keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
+    let seen = screen_until(&mut screen, |item| {
+        matches!(item, PaneItem::Event(PaneEvent::Cwd { .. }))
+    })
+    .await;
+    let first = first_drawing(&seen);
+    assert!(
+        first.contains("NEW SESSION") && !first.contains("OLD SESSION"),
+        "the phone's first picture of the pane has to be its current screen: \
+         {first:?} (all: {seen:?})"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_segment_still_coming_in_is_not_the_end_of_the_replay() {
+    let rig = Rig::new().await;
+    // The last segment takes far longer than a replay is given to go quiet,
+    // the link pausing now and then as it comes: what has arrived of it so
+    // far is the replay still going, not over.
+    let mut replay = two_sessions();
+    replay.push(DaemonMsg::Cwd("/src/demo".into()));
+    *rig.machine.replay.lock().unwrap() =
+        Some((replay, vec![(3, Duration::from_millis(900), true)]));
+    let session = within(rig.paired()).await;
+    let (_keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
+    let seen = screen_until(&mut screen, |item| {
+        matches!(item, PaneItem::Event(PaneEvent::Cwd { .. }))
+    })
+    .await;
+    let first = first_drawing(&seen);
+    assert!(
+        first.contains("NEW SESSION") && !first.contains("OLD SESSION"),
+        "drawn while the last segment was still coming in: {first:?} (all: {seen:?})"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

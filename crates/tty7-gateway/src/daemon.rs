@@ -400,6 +400,10 @@ impl PaneFeed for Observed {
         self.leases.take()
     }
 
+    fn partial(&self) -> usize {
+        self.output.partial()
+    }
+
     fn recv(&mut self, wait: Duration) -> io::Result<Option<DaemonMsg>> {
         self.output.set_recv_timeout(Some(wait))?;
         match self.output.recv() {

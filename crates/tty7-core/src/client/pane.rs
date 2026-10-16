@@ -412,6 +412,11 @@ impl PaneOutput {
         self.reader.set_read_timeout(wait)
     }
 
+    /// How much of a message has been read without the rest of it yet.
+    pub fn partial(&self) -> usize {
+        self.buffered.len()
+    }
+
     fn refusal_check(&mut self, request: &str, pane_id: u64) -> io::Result<()> {
         let mut scratch = [0u8; 4096];
         loop {
