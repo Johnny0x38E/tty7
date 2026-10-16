@@ -333,8 +333,9 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee3
 # (`tty7 capture --plain`). The daemon parses nothing; it is a byte pipe, and its
 # PTY is driven by `portable-pty`.
 #
-# The `tty7` branch is Zed's `fcf32fe` (the rev Zed pins) plus two commits, both
-# still missing from alacritty master as of 852e971:
+# The `tty7` branch is Zed's `fcf32fe` (the rev Zed pins) plus four commits.
+# Three are fixes still missing from alacritty master as of 852e971 and one
+# (`Config::conpty_resize`, #415) is a tty7-only opt-in:
 #
 # 1. `push_keyboard_mode` capped its stack by removing from `title_stack` instead
 #    of `keyboard_mode_stack` — a copy-paste slip from `push_title` that compiles
@@ -348,10 +349,22 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee3
 #    column instead of two and shifts the rest of the line left by one. The fork
 #    re-scores the sequence with `UnicodeWidthStr` and widens the cell (issue
 #    #203).
+# 3. `Config::conpty_resize` resizes the primary grid the way conhost re-anchors
+#    its own buffer, so a ConPTY pane's absolute cursor addresses stay right
+#    after a resize (#415).
+# 4. `Term::reset_keyboard_modes` empties both screens' kitty keyboard stacks
+#    and clears the flags in effect. No escape sequence can: `CSI = 0 u` only
+#    rewrites the flags in effect, so a push a killed program left on either
+#    screen's stack came back on the next pop or screen switch. The reader calls
+#    it when the shell's prompt returns (#1155). Additive; nothing upstream
+#    calls it.
 #
-# Each patch has a guard test in `src/terminal/remote.rs`; drop this fork once
-# both land upstream.
-alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "1276f128fbaa8832cbc66210675cbe8aeb570499" }
+# Patches 1, 2 and 4 each have a guard test in `src/terminal/remote.rs`
+# (`deep_keyboard_mode_pushes_leave_the_reader_alive`,
+# `emoji_presentation_sequences_reserve_two_columns`,
+# `a_prompt_forgets_kitty_flags_a_killed_program_left_on_either_screen`); drop
+# this fork once they land upstream and #415 has another home.
+alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "fe249ca805b4813940fbaee3974357b7e73df30a" }
 
 anyhow = "1"
 log = "0.4"

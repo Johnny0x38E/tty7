@@ -236,7 +236,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
-source = "git+https://github.com/l0ng-ai/alacritty?rev=1276f128fbaa8832cbc66210675cbe8aeb570499#1276f128fbaa8832cbc66210675cbe8aeb570499"
+source = "git+https://github.com/l0ng-ai/alacritty?rev=fe249ca805b4813940fbaee3974357b7e73df30a#fe249ca805b4813940fbaee3974357b7e73df30a"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
